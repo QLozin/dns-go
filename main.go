@@ -351,7 +351,7 @@ func parseName(data []byte, position int) (string, int, error) {
 		}
 
 		// 增加深度计数
-	depth++
+		depth++
 		if depth > 20 {
 			return "", 0, fmt.Errorf("exceeded maximum depth when parsing domain name")
 		}
@@ -427,7 +427,7 @@ func parsePointer(data []byte, position int, visitedPointers map[int]bool) (stri
 		}
 
 		// 增加深度计数
-	depth++
+		depth++
 		if depth > 20 {
 			return "", fmt.Errorf("exceeded maximum depth when parsing pointer")
 		}
@@ -471,6 +471,91 @@ func logDNSQuery(clientIP string, header DNSHeader, questions []DNSQuestion, res
 	}
 }
 
+// 添加EDNS Client Subnet扩展到DNS请求
+func addEDNSClientSubnet(data []byte, clientIP net.IP) ([]byte, error) {
+	// 检查数据长度是否足够
+	if len(data) < 12 {
+		return nil, fmt.Errorf("DNS message too short")
+	}
+
+	// 复制原始数据
+	newData := make([]byte, len(data))
+	copy(newData, data)
+
+	// 解析头部
+	header := DNSHeader{
+		ID:      binary.BigEndian.Uint16(newData[0:2]),
+		Flags:   binary.BigEndian.Uint16(newData[2:4]),
+		QDCount: binary.BigEndian.Uint16(newData[4:6]),
+		ANCount: binary.BigEndian.Uint16(newData[6:8]),
+		NSCount: binary.BigEndian.Uint16(newData[8:10]),
+		ARCount: binary.BigEndian.Uint16(newData[10:12]),
+	}
+
+	// 增加附加记录计数
+	header.ARCount++
+	binary.BigEndian.PutUint16(newData[10:12], header.ARCount)
+
+	// 创建EDNS0记录
+	var ednsRecord []byte
+
+	// 名称字段（根域名，长度为0）
+	ednsRecord = append(ednsRecord, 0x00)
+
+	// 类型：OPT (41)
+	ednsRecord = append(ednsRecord, 0x00, 0x29)
+
+	// UDP负载大小：4096
+	ednsRecord = append(ednsRecord, 0x00, 0xFF)
+
+	// 扩展RCODE和EDNS版本
+	ednsRecord = append(ednsRecord, 0x00, 0x00)
+
+	// Z字段（保留）
+	ednsRecord = append(ednsRecord, 0x00, 0x00)
+
+	// 数据长度
+	dataLength := 11 // 客户端子网选项的长度
+	ednsRecord = append(ednsRecord, byte(dataLength>>8), byte(dataLength&0xFF))
+
+	// 客户端子网选项
+	// 选项码：CLIENT_SUBNET (8)
+	ednsRecord = append(ednsRecord, 0x00, 0x08)
+
+	// 选项长度
+	optionLength := 7
+	ednsRecord = append(ednsRecord, byte(optionLength>>8), byte(optionLength&0xFF))
+
+	// 地址族：IPv4 (1) 或 IPv6 (2)
+	var family uint16
+	var sourceNetmask uint8
+	var scopeNetmask uint8
+	var addressBytes []byte
+
+	if ipv4 := clientIP.To4(); ipv4 != nil {
+		family = 1
+		sourceNetmask = 24 // 使用/24子网掩码
+		scopeNetmask = 0
+		addressBytes = ipv4[:3] // 只保留前3个字节
+	} else {
+		family = 2
+		sourceNetmask = 64 // IPv6使用/64子网掩码
+		scopeNetmask = 0
+		ipv6 := clientIP.To16()
+		addressBytes = ipv6[:8] // 只保留前8个字节
+	}
+
+	ednsRecord = append(ednsRecord, byte(family>>8), byte(family&0xFF))
+	ednsRecord = append(ednsRecord, sourceNetmask)
+	ednsRecord = append(ednsRecord, scopeNetmask)
+	ednsRecord = append(ednsRecord, addressBytes...)
+
+	// 将EDNS记录添加到消息末尾
+	newData = append(newData, ednsRecord...)
+
+	return newData, nil
+}
+
 // 处理UDP DNS请求
 func handleUDPQuery(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	// 解析DNS请求
@@ -511,6 +596,18 @@ func handleUDPQuery(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 		}
 	}
 
+	// 添加EDNS Client Subnet扩展，传递客户端真实IP
+	forwardData := data
+	if len(data) > 0 {
+		var ecdnsErr error
+		forwardData, ecdnsErr = addEDNSClientSubnet(data, addr.IP)
+		if ecdnsErr != nil {
+			log.Printf("Failed to add EDNS Client Subnet: %v", ecdnsErr)
+			// 继续使用原始数据
+			forwardData = data
+		}
+	}
+
 	// 将请求转发到上游DNS服务器
 	upstreamConn, err := net.Dial("udp", upstreamDNS)
 	if err != nil {
@@ -520,9 +617,9 @@ func handleUDPQuery(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	}
 	defer upstreamConn.Close()
 
-	// 发送原始请求数据
-	written, err := upstreamConn.Write(data)
-	if err != nil || written != len(data) {
+	// 发送处理后的请求数据
+	written, err := upstreamConn.Write(forwardData)
+	if err != nil || written != len(forwardData) {
 		log.Printf("Failed to send data to upstream DNS: %v", err)
 		logDNSQuery(addr.IP.String(), header, questions, "Failed to send data to upstream DNS")
 		return
@@ -592,6 +689,9 @@ func handleTCPQuery(conn *net.TCPConn) {
 		return
 	}
 
+	// 获取客户端地址
+	clientAddr := conn.RemoteAddr().(*net.TCPAddr)
+
 	// 域名过滤检查
 	for _, question := range questions {
 		domain := question.Name
@@ -622,9 +722,20 @@ func handleTCPQuery(conn *net.TCPConn) {
 			}
 
 			// 记录日志
-			clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 			logDNSQuery(clientAddr.IP.String(), header, questions, "BLOCKED: NXDOMAIN")
 			return
+		}
+	}
+
+	// 添加EDNS Client Subnet扩展，传递客户端真实IP
+	forwardData := data
+	if len(data) > 0 {
+		var ecdnsErr error
+		forwardData, ecdnsErr = addEDNSClientSubnet(data, clientAddr.IP)
+		if ecdnsErr != nil {
+			log.Printf("Failed to add EDNS Client Subnet: %v", ecdnsErr)
+			// 继续使用原始数据
+			forwardData = data
 		}
 	}
 
@@ -632,21 +743,19 @@ func handleTCPQuery(conn *net.TCPConn) {
 	upstreamConn, err := net.Dial("tcp", upstreamDNS)
 	if err != nil {
 		log.Printf("Failed to connect to upstream DNS: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to connect to upstream DNS")
 		return
 	}
 	defer upstreamConn.Close()
 
-	// 发送原始请求数据(包含长度前缀)
-	fullRequest := make([]byte, 2+len(data))
-	binary.BigEndian.PutUint16(fullRequest[:2], uint16(len(data)))
-	copy(fullRequest[2:], data)
+	// 发送处理后的请求数据(包含长度前缀)
+	fullRequest := make([]byte, 2+len(forwardData))
+	binary.BigEndian.PutUint16(fullRequest[:2], uint16(len(forwardData)))
+	copy(fullRequest[2:], forwardData)
 
 	written, err := upstreamConn.Write(fullRequest)
 	if err != nil || written != len(fullRequest) {
 		log.Printf("Failed to send data to upstream DNS: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to send data to upstream DNS")
 		return
 	}
@@ -655,7 +764,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 	err = upstreamConn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if err != nil {
 		log.Printf("Failed to set read deadline: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to set read deadline")
 		return
 	}
@@ -665,7 +773,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 	_, err = io.ReadFull(upstreamConn, responseLengthBuf)
 	if err != nil {
 		log.Printf("Failed to read response length: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to read response length")
 		return
 	}
@@ -678,7 +785,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 	_, err = io.ReadFull(upstreamConn, response)
 	if err != nil {
 		log.Printf("Failed to read response from upstream DNS: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to read response")
 		return
 	}
@@ -691,7 +797,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 	written, err = conn.Write(fullResponse)
 	if err != nil || written != len(fullResponse) {
 		log.Printf("Failed to send response to client: %v", err)
-		clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 		logDNSQuery(clientAddr.IP.String(), header, questions, "Failed to send response to client")
 		return
 	}
@@ -702,7 +807,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 		log.Printf("Failed to parse DNS response: %v", err)
 		responseResult = "Error parsing response"
 	}
-	clientAddr := conn.RemoteAddr().(*net.TCPAddr)
 	logDNSQuery(clientAddr.IP.String(), header, questions, responseResult)
 }
 
