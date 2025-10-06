@@ -56,7 +56,7 @@ type DNSLogEntry struct {
 var (
 	logFile     *os.File
 	logMutex    sync.Mutex
-	upstreamDNS = "localhost:5353"
+	upstreamDNS = "100.90.80.129:5353"
 )
 
 // 解析DNS消息
@@ -296,21 +296,31 @@ func createNXDomainResponse(queryData []byte) ([]byte, error) {
 func parseName(data []byte, position int) (string, int, error) {
 	var name strings.Builder
 	currentPosition := position
+	// 使用栈来模拟递归调用，确保不会发生递归导致的栈溢出
+	var stack []int
 	// 用于跟踪访问过的指针位置，防止循环引用
 	visitedPointers := make(map[int]bool)
 	// 跟踪深度，作为额外的安全措施
 	depth := 0
 
-	for {
+	// 初始化栈，放入起始位置
+	stack = append(stack, currentPosition)
+
+	// 当栈不为空时，继续处理
+	for len(stack) > 0 && depth <= 20 {
+		currentPosition = stack[len(stack)-1]
+		// 从栈中移除当前位置，因为我们现在要处理它
+		stack = stack[:len(stack)-1]
+
 		// 检查边界，确保currentPosition不超出data长度
 		if currentPosition >= len(data) {
 			return "", 0, fmt.Errorf("domain name parsing out of bounds")
 		}
 		length := int(data[currentPosition])
-		currentPosition++
 
 		if length == 0 {
-			break
+			// 标签结束，继续处理栈中的下一个元素
+			continue
 		}
 
 		// 检查是否是指针
@@ -318,11 +328,10 @@ func parseName(data []byte, position int) (string, int, error) {
 			// 指针格式: 前两位是11，后六位是偏移量的高六位
 			// 下一个字节是偏移量的低八位
 			// 检查边界，确保currentPosition不超出data长度
-			if currentPosition >= len(data) {
+			if currentPosition+1 >= len(data) {
 				return "", 0, fmt.Errorf("invalid pointer in domain name")
 			}
-			pointer := int(((length & 0x3F) << 8) | int(data[currentPosition]))
-			currentPosition++
+			pointer := int(((length & 0x3F) << 8) | int(data[currentPosition+1]))
 			// 检查指针是否有效
 			if pointer >= len(data) {
 				return "", 0, fmt.Errorf("pointer points outside data")
@@ -331,21 +340,24 @@ func parseName(data []byte, position int) (string, int, error) {
 			if visitedPointers[pointer] {
 				return "", 0, fmt.Errorf("circular reference detected in domain name")
 			}
+			// 记录已访问的指针
+			visitedPointers[pointer] = true
 			// 使用迭代方法解析指针指向的域名
 			ptrName, err := parsePointer(data, pointer, visitedPointers)
 			if err != nil {
 				return "", 0, err
 			}
 			name.WriteString(ptrName)
-			break
 		} else if length <= 63 {
 			// 普通标签
-			if currentPosition+length > len(data) {
+			if currentPosition+1+length > len(data) {
 				return "", 0, fmt.Errorf("invalid domain name format")
 			}
-			name.WriteString(string(data[currentPosition : currentPosition+length]))
-			currentPosition += length
-			name.WriteString(".")
+			name.WriteString(string(data[currentPosition+1 : currentPosition+1+length]))
+			// 如果不是最后一个元素，添加点号
+			if len(stack) > 0 {
+				name.WriteString(".")
+			}
 		} else {
 			return "", 0, fmt.Errorf("invalid label length")
 		}
@@ -363,7 +375,7 @@ func parseName(data []byte, position int) (string, int, error) {
 		result = result[:len(result)-1]
 	}
 
-	return result, currentPosition, nil
+	return result, currentPosition + 1, nil
 }
 
 // 迭代解析指针指向的域名
@@ -605,6 +617,10 @@ func handleUDPQuery(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 			log.Printf("Failed to add EDNS Client Subnet: %v", ecdnsErr)
 			// 继续使用原始数据
 			forwardData = data
+		} else {
+			// 验证EDNS Client Subnet扩展是否被正确添加
+			hasECS := hasEDNSClientSubnet(forwardData)
+			log.Printf("EDNS Client Subnet added for %s, ECS extension present: %v", addr.IP.String(), hasECS)
 		}
 	}
 
@@ -736,6 +752,10 @@ func handleTCPQuery(conn *net.TCPConn) {
 			log.Printf("Failed to add EDNS Client Subnet: %v", ecdnsErr)
 			// 继续使用原始数据
 			forwardData = data
+		} else {
+			// 验证EDNS Client Subnet扩展是否被正确添加
+			hasECS := hasEDNSClientSubnet(forwardData)
+			log.Printf("EDNS Client Subnet added for %s, ECS extension present: %v", clientAddr.IP.String(), hasECS)
 		}
 	}
 
