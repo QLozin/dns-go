@@ -226,9 +226,7 @@ func normalizeDomain(s string) string {
 		return ""
 	}
 	// Remove leading wildcard '*.'
-	if strings.HasPrefix(s, "*.") {
-		s = s[2:]
-	}
+	s = strings.TrimPrefix(s, "*.")
 	// Ensure only valid domain runes (basic)
 	for i := 0; i < len(s); i++ {
 		c := s[i]

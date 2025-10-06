@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"dnsgolang/third_party/toml"
+	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
