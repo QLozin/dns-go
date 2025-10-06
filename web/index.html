@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DNS Dashboard</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+      h2 { margin: 24px 0 8px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 12px; }
+      th { background: #f5f5f5; text-align: left; }
+      .section { margin-bottom: 28px; }
+      .muted { color: #666; }
+      .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; }
+      .blocked { background: #ffe6e6; color: #a00; }
+      .ok { background: #e6ffe6; color: #0a0; }
+      .row { display: flex; gap: 16px; }
+      .col { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <h1>DNS Dashboard</h1>
+    <div id="app"></div>
+
+    <script>
+      const App = () => {
+        const [logs, setLogs] = React.useState([]);
+        const [topClients, setTopClients] = React.useState([]);
+        const [blockedStats, setBlockedStats] = React.useState([]);
+
+        const fetchAll = React.useCallback(async () => {
+          const [logsRes, topRes, blkRes] = await Promise.all([
+            fetch('/api/logs'), fetch('/api/top-clients'), fetch('/api/blocked-stats')
+          ]);
+          setLogs(await logsRes.json());
+          setTopClients(await topRes.json());
+          setBlockedStats(await blkRes.json());
+        }, []);
+
+        React.useEffect(() => {
+          fetchAll();
+          const t = setInterval(fetchAll, 5000);
+          return () => clearInterval(t);
+        }, [fetchAll]);
+
+        return (
+          React.createElement(React.Fragment, null,
+            React.createElement('div', { className: 'section' },
+              React.createElement('h2', null, 'Query Logs'),
+              React.createElement('table', null,
+                React.createElement('thead', null,
+                  React.createElement('tr', null,
+                    ['time','client','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
+                  )
+                ),
+                React.createElement('tbody', null,
+                  logs.map((r, i) => React.createElement('tr', { key: i }, [
+                    React.createElement('td', { key: 't' }, r.time),
+                    React.createElement('td', { key: 'c' }, r.client_ip),
+                    React.createElement('td', { key: 'p' }, r.proto),
+                    React.createElement('td', { key: 'id' }, r.id),
+                    React.createElement('td', { key: 'qn' }, r.qname),
+                    React.createElement('td', { key: 'qt' }, r.qtype),
+                    React.createElement('td', { key: 'rc' }, r.rcode),
+                    React.createElement('td', { key: 'an', className: 'muted' }, r.answers),
+                    React.createElement('td', { key: 'rt' }, r.rtt_ms?.toFixed ? r.rtt_ms.toFixed(2) : r.rtt_ms),
+                    React.createElement('td', { key: 'bl' },
+                      React.createElement('span', { className: 'badge ' + (r.blocked ? 'blocked' : 'ok') }, r.blocked ? 'blocked' : 'ok')
+                    ),
+                    React.createElement('td', { key: 'er', className: 'muted' }, r.error || '')
+                  ]))
+                )
+              )
+            ),
+
+            React.createElement('div', { className: 'section' },
+              React.createElement('h2', null, 'Top 10 Clients (24h)'),
+              React.createElement('table', null,
+                React.createElement('thead', null,
+                  React.createElement('tr', null,
+                    ['client_ip','count'].map(h => React.createElement('th', { key: h }, h))
+                  )
+                ),
+                React.createElement('tbody', null,
+                  topClients.map((r, i) => React.createElement('tr', { key: i }, [
+                    React.createElement('td', { key: 'c' }, r.client_ip),
+                    React.createElement('td', { key: 'n' }, r.count)
+                  ]))
+                )
+              )
+            ),
+
+            React.createElement('div', { className: 'section' },
+              React.createElement('h2', null, 'Blocked Domains Stats (All time)'),
+              React.createElement('table', null,
+                React.createElement('thead', null,
+                  React.createElement('tr', null,
+                    ['qname','count'].map(h => React.createElement('th', { key: h }, h))
+                  )
+                ),
+                React.createElement('tbody', null,
+                  blockedStats.map((r, i) => React.createElement('tr', { key: i }, [
+                    React.createElement('td', { key: 'q' }, r.qname),
+                    React.createElement('td', { key: 'n' }, r.count)
+                  ]))
+                )
+              )
+            )
+          )
+        );
+      };
+    </script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script>
+      ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(App));
+    </script>
+  </body>
+  </html>
+
+
