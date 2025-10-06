@@ -706,10 +706,6 @@ func handleTCPQuery(conn *net.TCPConn) {
 			log.Printf("Failed to add EDNS Client Subnet: %v", ecdnsErr)
 			// 继续使用原始数据
 			forwardData = data
-		} else {
-			// 验证EDNS Client Subnet扩展是否被正确添加
-			hasECS := hasEDNSClientSubnet(forwardData)
-			log.Printf("EDNS Client Subnet added for %s, ECS extension present: %v", clientAddr.IP.String(), hasECS)
 		}
 	}
 
