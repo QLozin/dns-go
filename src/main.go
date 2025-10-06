@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -36,7 +37,14 @@ type logEntry struct {
 	Error       string   `json:"error,omitempty"`
 }
 
+var blockMgr *BlockManager
+
 func main() {
+	// Initialize blocking manager and start scheduler (non-fatal on config/download errors)
+	blockMgr = NewBlockManager("env.toml")
+	stopCh := make(chan struct{})
+	blockMgr.StartScheduler(stopCh)
+
 	// Start UDP and TCP servers
 	udpErrCh := make(chan error, 1)
 	tcpErrCh := make(chan error, 1)
@@ -172,6 +180,19 @@ func handleTCPConn(conn net.Conn) {
 
 func forwardUDP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, error) {
 	qname, qtype, id := parseQuestion(req)
+	// Enforce whitelist/blacklist before forwarding
+	if blockMgr != nil && qname != "" {
+		q := strings.TrimSuffix(qname, ".")
+		if blockMgr.IsWhitelisted(q) {
+			// pass through
+		} else if blockMgr.IsBlocked(q) {
+			resp, err := buildNXDomainResponse(req)
+			if err != nil {
+				return nil, 0, "", qname, qtype, nil, id, err
+			}
+			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, nil
+		}
+	}
 	// Forward raw packet to upstream via UDP
 	raddr, err := net.ResolveUDPAddr("udp", upstreamUDP)
 	if err != nil {
@@ -202,6 +223,19 @@ func forwardUDP(req []byte) ([]byte, time.Duration, string, string, string, []st
 
 func forwardTCP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, error) {
 	qname, qtype, id := parseQuestion(req)
+	// Enforce whitelist/blacklist before forwarding
+	if blockMgr != nil && qname != "" {
+		q := strings.TrimSuffix(qname, ".")
+		if blockMgr.IsWhitelisted(q) {
+			// pass through
+		} else if blockMgr.IsBlocked(q) {
+			resp, err := buildNXDomainResponse(req)
+			if err != nil {
+				return nil, 0, "", qname, qtype, nil, id, err
+			}
+			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, nil
+		}
+	}
 	conn, err := net.DialTimeout("tcp", upstreamTCP, readTimeout)
 	if err != nil {
 		return nil, 0, "", qname, qtype, nil, id, err
