@@ -34,6 +34,7 @@ type logEntry struct {
 	RCode       string   `json:"rcode"`
 	Answers     []string `json:"answers"`
 	RTT         string   `json:"rtt"`
+	Blocked     bool     `json:"blocked,omitempty"`
 	Error       string   `json:"error,omitempty"`
 }
 
@@ -86,7 +87,7 @@ func serveUDP() error {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 		go func(clientAddr net.Addr, reqBytes []byte) {
-			respBytes, rtt, rcode, qname, qtype, answers, id, hErr := forwardUDP(reqBytes)
+			respBytes, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := forwardUDP(reqBytes)
 
 			entry := logEntry{
 				TimeRFC3339: time.Now().Format(time.RFC3339Nano),
@@ -98,6 +99,7 @@ func serveUDP() error {
 				RCode:       rcode,
 				Answers:     answers,
 				RTT:         fmt.Sprintf("%.2fms", float64(rtt.Microseconds())/1000.0),
+				Blocked:     wasBlocked,
 			}
 			if hErr != nil {
 				entry.Error = hErr.Error()
@@ -149,7 +151,7 @@ func handleTCPConn(conn net.Conn) {
 		return
 	}
 
-	resp, rtt, rcode, qname, qtype, answers, id, hErr := forwardTCP(req)
+	resp, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := forwardTCP(req)
 	entry := logEntry{
 		TimeRFC3339: time.Now().Format(time.RFC3339Nano),
 		ClientIP:    clientIPFromAddr(conn.RemoteAddr()),
@@ -160,6 +162,7 @@ func handleTCPConn(conn net.Conn) {
 		RCode:       rcode,
 		Answers:     answers,
 		RTT:         fmt.Sprintf("%.2fms", float64(rtt.Microseconds())/1000.0),
+		Blocked:     wasBlocked,
 	}
 	if hErr != nil {
 		entry.Error = hErr.Error()
@@ -178,7 +181,7 @@ func handleTCPConn(conn net.Conn) {
 	_, _ = conn.Write(resp)
 }
 
-func forwardUDP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, error) {
+func forwardUDP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, bool, error) {
 	qname, qtype, id := parseQuestion(req)
 	// Enforce whitelist/blacklist before forwarding
 	if blockMgr != nil && qname != "" {
@@ -188,40 +191,40 @@ func forwardUDP(req []byte) ([]byte, time.Duration, string, string, string, []st
 		} else if blockMgr.IsBlocked(q) {
 			resp, err := buildNXDomainResponse(req)
 			if err != nil {
-				return nil, 0, "", qname, qtype, nil, id, err
+				return nil, 0, "", qname, qtype, nil, id, true, err
 			}
-			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, nil
+			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, true, nil
 		}
 	}
 	// Forward raw packet to upstream via UDP
 	raddr, err := net.ResolveUDPAddr("udp", upstreamUDP)
 	if err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	conn, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(readTimeout))
 	start := time.Now()
 	if _, err = conn.Write(req); err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	buf := make([]byte, 4096)
 	n, _, err := conn.ReadFrom(buf)
 	if err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	rtt := time.Since(start)
 	resp := make([]byte, n)
 	copy(resp, buf[:n])
 
 	rcode, answers := parseResponse(resp)
-	return resp, rtt, rcode, qname, qtype, answers, id, nil
+	return resp, rtt, rcode, qname, qtype, answers, id, false, nil
 }
 
-func forwardTCP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, error) {
+func forwardTCP(req []byte) ([]byte, time.Duration, string, string, string, []string, uint16, bool, error) {
 	qname, qtype, id := parseQuestion(req)
 	// Enforce whitelist/blacklist before forwarding
 	if blockMgr != nil && qname != "" {
@@ -231,44 +234,44 @@ func forwardTCP(req []byte) ([]byte, time.Duration, string, string, string, []st
 		} else if blockMgr.IsBlocked(q) {
 			resp, err := buildNXDomainResponse(req)
 			if err != nil {
-				return nil, 0, "", qname, qtype, nil, id, err
+				return nil, 0, "", qname, qtype, nil, id, true, err
 			}
-			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, nil
+			return resp, 0, "NXDOMAIN", qname, qtype, nil, id, true, nil
 		}
 	}
 	conn, err := net.DialTimeout("tcp", upstreamTCP, readTimeout)
 	if err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(readTimeout))
 
 	// Write length prefix + message
 	if _, err := conn.Write([]byte{byte(len(req) >> 8), byte(len(req))}); err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	if _, err := conn.Write(req); err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 
 	// Read response length + message
 	hdr := make([]byte, 2)
 	if _, err := io.ReadFull(conn, hdr); err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	respLen := int(hdr[0])<<8 | int(hdr[1])
 	if respLen <= 0 || respLen > 65535 {
-		return nil, 0, "", qname, qtype, nil, id, errors.New("invalid tcp dns length")
+		return nil, 0, "", qname, qtype, nil, id, false, errors.New("invalid tcp dns length")
 	}
 	resp := make([]byte, respLen)
 	start := time.Now()
 	if _, err := io.ReadFull(conn, resp); err != nil {
-		return nil, 0, "", qname, qtype, nil, id, err
+		return nil, 0, "", qname, qtype, nil, id, false, err
 	}
 	rtt := time.Since(start)
 
 	rcode, answers := parseResponse(resp)
-	return resp, rtt, rcode, qname, qtype, answers, id, nil
+	return resp, rtt, rcode, qname, qtype, answers, id, false, nil
 }
 
 func parseQuestion(msg []byte) (qname string, qtype string, id uint16) {
