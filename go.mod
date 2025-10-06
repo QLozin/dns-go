@@ -1,5 +1,7 @@
 module dnsgolang
 
-go 1.23.3
+go 1.24.0
 
-require github.com/BurntSushi/toml v1.5.0
+toolchain go1.24.7
+
+require golang.org/x/net v0.44.0
