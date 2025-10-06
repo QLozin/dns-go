@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -23,16 +24,16 @@ const (
 )
 
 type logEntry struct {
-	TimeRFC3339 string        `json:"time"`
-	ClientIP    string        `json:"client_ip"`
-	Protocol    string        `json:"proto"`
-	ID          uint16        `json:"id"`
-	QName       string        `json:"qname"`
-	QType       string        `json:"qtype"`
-	RCode       string        `json:"rcode"`
-	Answers     []string      `json:"answers"`
-	RTT         time.Duration `json:"rtt"`
-	Error       string        `json:"error,omitempty"`
+	TimeRFC3339 string   `json:"time"`
+	ClientIP    string   `json:"client_ip"`
+	Protocol    string   `json:"proto"`
+	ID          uint16   `json:"id"`
+	QName       string   `json:"qname"`
+	QType       string   `json:"qtype"`
+	RCode       string   `json:"rcode"`
+	Answers     []string `json:"answers"`
+	RTT         string   `json:"rtt"`
+	Error       string   `json:"error,omitempty"`
 }
 
 func main() {
@@ -88,7 +89,7 @@ func serveUDP() error {
 				QType:       qtype,
 				RCode:       rcode,
 				Answers:     answers,
-				RTT:         rtt,
+				RTT:         fmt.Sprintf("%.2fms", float64(rtt.Microseconds())/1000.0),
 			}
 			if hErr != nil {
 				entry.Error = hErr.Error()
@@ -150,7 +151,7 @@ func handleTCPConn(conn net.Conn) {
 		QType:       qtype,
 		RCode:       rcode,
 		Answers:     answers,
-		RTT:         rtt,
+		RTT:         fmt.Sprintf("%.2fms", float64(rtt.Microseconds())/1000.0),
 	}
 	if hErr != nil {
 		entry.Error = hErr.Error()
