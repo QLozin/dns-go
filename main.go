@@ -292,10 +292,14 @@ func createNXDomainResponse(queryData []byte) ([]byte, error) {
 	return response, nil
 }
 
-// 解析域名
+// 解析域名 - 迭代版本，避免递归栈溢出
 func parseName(data []byte, position int) (string, int, error) {
 	var name strings.Builder
 	currentPosition := position
+	// 用于跟踪访问过的指针位置，防止循环引用
+	visitedPointers := make(map[int]bool)
+	// 跟踪深度，作为额外的安全措施
+	depth := 0
 
 	for {
 		// 检查边界，确保currentPosition不超出data长度
@@ -318,16 +322,21 @@ func parseName(data []byte, position int) (string, int, error) {
 				return "", 0, fmt.Errorf("invalid pointer in domain name")
 			}
 			pointer := int(((length & 0x3F) << 8) | int(data[currentPosition]))
+			currentPosition++
 			// 检查指针是否有效
 			if pointer >= len(data) {
 				return "", 0, fmt.Errorf("pointer points outside data")
 			}
-			pointerName, _, err := parseName(data, pointer)
+			// 检查是否存在循环引用
+			if visitedPointers[pointer] {
+				return "", 0, fmt.Errorf("circular reference detected in domain name")
+			}
+			// 使用迭代方法解析指针指向的域名
+			ptrName, err := parsePointer(data, pointer, visitedPointers)
 			if err != nil {
 				return "", 0, err
 			}
-			name.WriteString(pointerName)
-			currentPosition++
+			name.WriteString(ptrName)
 			break
 		} else if length <= 63 {
 			// 普通标签
@@ -340,6 +349,12 @@ func parseName(data []byte, position int) (string, int, error) {
 		} else {
 			return "", 0, fmt.Errorf("invalid label length")
 		}
+
+		// 增加深度计数
+	depth++
+		if depth > 20 {
+			return "", 0, fmt.Errorf("exceeded maximum depth when parsing domain name")
+		}
 	}
 
 	// 移除末尾的点号
@@ -349,6 +364,82 @@ func parseName(data []byte, position int) (string, int, error) {
 	}
 
 	return result, currentPosition, nil
+}
+
+// 迭代解析指针指向的域名
+func parsePointer(data []byte, position int, visitedPointers map[int]bool) (string, error) {
+	var name strings.Builder
+	// 使用栈来模拟递归调用
+	var stack []int
+	// 初始化栈，放入起始位置
+	stack = append(stack, position)
+	// 标记当前指针为已访问
+	visitedPointers[position] = true
+	// 跟踪深度
+	depth := 0
+
+	// 当栈不为空时，继续处理
+	for len(stack) > 0 && depth <= 20 {
+		currentPosition := stack[len(stack)-1]
+		// 检查边界
+		if currentPosition >= len(data) {
+			return "", fmt.Errorf("pointer parsing out of bounds")
+		}
+		length := int(data[currentPosition])
+
+		// 处理不同情况
+		if length == 0 {
+			// 标签结束，弹出栈顶元素
+			stack = stack[:len(stack)-1]
+		} else if length&0xC0 == 0xC0 {
+			// 指针格式
+			if currentPosition+1 >= len(data) {
+				return "", fmt.Errorf("invalid nested pointer")
+			}
+			pointer := int(((length & 0x3F) << 8) | int(data[currentPosition+1]))
+			// 检查指针是否有效
+			if pointer >= len(data) {
+				return "", fmt.Errorf("nested pointer points outside data")
+			}
+			// 检查是否存在循环引用
+			if visitedPointers[pointer] {
+				return "", fmt.Errorf("circular reference detected in nested pointer")
+			}
+			// 记录新指针位置
+			visitedPointers[pointer] = true
+			// 将新指针位置压入栈
+			stack = append(stack, pointer)
+		} else if length <= 63 {
+			// 普通标签
+			if currentPosition+1+length > len(data) {
+				return "", fmt.Errorf("invalid domain name format in pointer")
+			}
+			// 添加标签到结果
+			name.WriteString(string(data[currentPosition+1 : currentPosition+1+length]))
+			// 如果不是最后一个元素，添加点号
+			if len(stack) > 1 {
+				name.WriteString(".")
+			}
+			// 弹出栈顶元素
+			stack = stack[:len(stack)-1]
+		} else {
+			return "", fmt.Errorf("invalid label length in pointer")
+		}
+
+		// 增加深度计数
+	depth++
+		if depth > 20 {
+			return "", fmt.Errorf("exceeded maximum depth when parsing pointer")
+		}
+	}
+
+	// 移除末尾的点号
+	result := name.String()
+	if len(result) > 0 && result[len(result)-1] == '.' {
+		result = result[:len(result)-1]
+	}
+
+	return result, nil
 }
 
 // 记录DNS查询日志
