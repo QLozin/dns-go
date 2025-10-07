@@ -17,6 +17,7 @@ import (
 type DnsLogObj struct {
 	TimeRFC3339 string   `json:"time"`
 	ClientIP    string   `json:"client_ip"`
+	CountryZH   string   `json:"country"`
 	Protocol    string   `json:"proto"`
 	ID          uint16   `json:"id"`
 	QName       string   `json:"qname"`
@@ -108,10 +109,42 @@ func (s *server) serveUDP(ctx context.Context) error {
 		data := make([]byte, n)
 		copy(data, buf[:n])
 		go func(clientAddr net.Addr, reqBytes []byte) {
+			clientIP := clientIPFromAddr(clientAddr)
+			// GeoIP country check
+			var countryZH string
+			if s.blockMgr != nil {
+				allowed, _, zh := s.blockMgr.IsClientAllowed(clientIP)
+				countryZH = zh
+				if !allowed {
+					// Block by country: return NXDOMAIN immediately
+					resp, _ := buildNXDomainResponse(reqBytes)
+					entry := DnsLogObj{
+						TimeRFC3339: time.Now().Format(time.RFC3339Nano),
+						ClientIP:    clientIP,
+						CountryZH:   countryZH,
+						Protocol:    "udp",
+						ID:          0,
+						QName:       "",
+						QType:       "",
+						RCode:       "NXDOMAIN",
+						Answers:     nil,
+						RTT:         "0.00ms",
+						Blocked:     true,
+					}
+					if s.onLog != nil {
+						s.onLog(entry)
+					}
+					if resp != nil {
+						_ = s.writePacket(pc, clientAddr, resp)
+					}
+					return
+				}
+			}
 			respBytes, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := s.forwardUDP(reqBytes)
 			entry := DnsLogObj{
 				TimeRFC3339: time.Now().Format(time.RFC3339Nano),
-				ClientIP:    clientIPFromAddr(clientAddr),
+				ClientIP:    clientIP,
+				CountryZH:   countryZH,
 				Protocol:    "udp",
 				ID:          id,
 				QName:       qname,
@@ -173,10 +206,45 @@ func (s *server) handleTCPConn(conn net.Conn) {
 		return
 	}
 
+	// GeoIP country check
+	clientIP := clientIPFromAddr(conn.RemoteAddr())
+	var countryZH string
+	if s.blockMgr != nil {
+		allowed, _, zh := s.blockMgr.IsClientAllowed(clientIP)
+		countryZH = zh
+		if !allowed {
+			resp, _ := buildNXDomainResponse(req)
+			entry := DnsLogObj{
+				TimeRFC3339: time.Now().Format(time.RFC3339Nano),
+				ClientIP:    clientIP,
+				CountryZH:   countryZH,
+				Protocol:    "tcp",
+				ID:          0,
+				QName:       "",
+				QType:       "",
+				RCode:       "NXDOMAIN",
+				Answers:     nil,
+				RTT:         "0.00ms",
+				Blocked:     true,
+			}
+			if s.onLog != nil {
+				s.onLog(entry)
+			}
+			if resp != nil {
+				_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
+				outLen := []byte{byte(len(resp) >> 8), byte(len(resp))}
+				if _, err := conn.Write(outLen); err == nil {
+					_, _ = conn.Write(resp)
+				}
+			}
+			return
+		}
+	}
 	resp, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := s.forwardTCP(req)
 	entry := DnsLogObj{
 		TimeRFC3339: time.Now().Format(time.RFC3339Nano),
-		ClientIP:    clientIPFromAddr(conn.RemoteAddr()),
+		ClientIP:    clientIP,
+		CountryZH:   countryZH,
 		Protocol:    "tcp",
 		ID:          id,
 		QName:       qname,

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS query_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   time_rfc3339 TEXT NOT NULL,
   client_ip TEXT NOT NULL,
+  country TEXT,
   proto TEXT NOT NULL,
   qid INTEGER NOT NULL,
   qname TEXT NOT NULL,
@@ -44,12 +45,18 @@ CREATE INDEX IF NOT EXISTS idx_query_logs_time ON query_logs(time_rfc3339);
 CREATE INDEX IF NOT EXISTS idx_query_logs_client ON query_logs(client_ip);
 CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs(qname);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Try to add column if table already existed without country
+	_, _ = db.Exec(`ALTER TABLE query_logs ADD COLUMN country TEXT;`)
+	return nil
 }
 
 type QueryLogRow struct {
 	TimeRFC3339 string
 	ClientIP    string
+	Country     string
 	Proto       string
 	QID         int64
 	QName       string
@@ -62,8 +69,8 @@ type QueryLogRow struct {
 }
 
 func (db *DB) InsertQueryLog(r QueryLogRow) error {
-	_, err := db.Exec(`INSERT INTO query_logs(time_rfc3339, client_ip, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)`, r.TimeRFC3339, r.ClientIP, r.Proto, r.QID, r.QName, r.QType, r.RCode, r.Answers, r.RTTms, boolToInt(r.Blocked), nullStr(r.Error))
+	_, err := db.Exec(`INSERT INTO query_logs(time_rfc3339, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.TimeRFC3339, r.ClientIP, nullEmpty(r.Country), r.Proto, r.QID, r.QName, r.QType, r.RCode, r.Answers, r.RTTms, boolToInt(r.Blocked), nullStr(r.Error))
 	return err
 }
 
@@ -71,18 +78,31 @@ func (db *DB) ListQueryLogs(limit int) (*sql.Rows, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	return db.Query(`SELECT time_rfc3339, client_ip, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error FROM query_logs ORDER BY id DESC LIMIT ?`, limit)
+	return db.Query(`SELECT time_rfc3339, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error FROM query_logs ORDER BY id DESC LIMIT ?`, limit)
 }
 
 func (db *DB) TopClientsSince(since time.Time, limit int) (*sql.Rows, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	return db.Query(`SELECT client_ip, COUNT(1) as cnt FROM query_logs WHERE time_rfc3339 >= ? GROUP BY client_ip ORDER BY cnt DESC LIMIT ?`, since.Format(time.RFC3339Nano), limit)
+	return db.Query(`
+        SELECT client_ip, COALESCE(country,'') as country, COUNT(1) as cnt
+        FROM query_logs
+        WHERE time_rfc3339 >= ?
+        GROUP BY client_ip, country
+        ORDER BY cnt DESC
+        LIMIT ?
+    `, since.Format(time.RFC3339Nano), limit)
 }
 
 func (db *DB) BlockedStatsAll() (*sql.Rows, error) {
-	return db.Query(`SELECT qname, COUNT(1) as cnt FROM query_logs WHERE blocked=1 GROUP BY qname ORDER BY cnt DESC`)
+	return db.Query(`
+        SELECT qname, COALESCE(country,'') as country, COUNT(1) as cnt
+        FROM query_logs
+        WHERE blocked=1
+        GROUP BY qname, country
+        ORDER BY cnt DESC
+    `)
 }
 
 func boolToInt(b bool) int {
@@ -96,4 +116,11 @@ func nullStr(s sql.NullString) any {
 		return s.String
 	}
 	return nil
+}
+
+func nullEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

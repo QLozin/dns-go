@@ -27,6 +27,7 @@ func (a *API) getLogs(c echo.Context) error {
 	type row struct {
 		Time     string  `json:"time"`
 		ClientIP string  `json:"client_ip"`
+		Country  string  `json:"country"`
 		Proto    string  `json:"proto"`
 		QID      int64   `json:"id"`
 		QName    string  `json:"qname"`
@@ -42,7 +43,7 @@ func (a *API) getLogs(c echo.Context) error {
 		var r row
 		var errStr sql.NullString
 		var blockedInt int
-		if err := rows.Scan(&r.Time, &r.ClientIP, &r.Proto, &r.QID, &r.QName, &r.QType, &r.RCode, &r.Answers, &r.RTTms, &blockedInt, &errStr); err != nil {
+		if err := rows.Scan(&r.Time, &r.ClientIP, &r.Country, &r.Proto, &r.QID, &r.QName, &r.QType, &r.RCode, &r.Answers, &r.RTTms, &blockedInt, &errStr); err != nil {
 			return err
 		}
 		r.Blocked = blockedInt == 1
@@ -62,12 +63,13 @@ func (a *API) getTopClients(c echo.Context) error {
 	defer rows.Close()
 	type row struct {
 		ClientIP string `json:"client_ip"`
+		Country  string `json:"country"`
 		Count    int64  `json:"count"`
 	}
 	var out []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.ClientIP, &r.Count); err != nil {
+		if err := rows.Scan(&r.ClientIP, &r.Country, &r.Count); err != nil {
 			return err
 		}
 		out = append(out, r)
@@ -82,13 +84,14 @@ func (a *API) getBlockedStats(c echo.Context) error {
 	}
 	defer rows.Close()
 	type row struct {
-		QName string `json:"qname"`
-		Count int64  `json:"count"`
+		QName   string `json:"qname"`
+		Country string `json:"country"`
+		Count   int64  `json:"count"`
 	}
 	var out []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.QName, &r.Count); err != nil {
+		if err := rows.Scan(&r.QName, &r.Country, &r.Count); err != nil {
 			return err
 		}
 		out = append(out, r)

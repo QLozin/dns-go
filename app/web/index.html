@@ -57,13 +57,14 @@
                 React.createElement('table', null,
                   React.createElement('thead', null,
                     React.createElement('tr', null,
-                      ['time','client','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
+                      ['time','client','country','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
                     )
                   ),
                   React.createElement('tbody', null,
                     displayedLogs.map((r, i) => React.createElement('tr', { key: i }, [
                       React.createElement('td', { key: 't' }, r.time),
                       React.createElement('td', { key: 'c' }, r.client_ip),
+                      React.createElement('td', { key: 'ct' }, r.country || ''),
                       React.createElement('td', { key: 'p' }, r.proto),
                       React.createElement('td', { key: 'id' }, r.id),
                       React.createElement('td', { key: 'qn' }, r.qname),
@@ -86,12 +87,13 @@
               React.createElement('table', null,
                 React.createElement('thead', null,
                   React.createElement('tr', null,
-                    ['client_ip','count'].map(h => React.createElement('th', { key: h }, h))
+                    ['client_ip','country','count'].map(h => React.createElement('th', { key: h }, h))
                   )
                 ),
                 React.createElement('tbody', null,
                   topClients.map((r, i) => React.createElement('tr', { key: i }, [
                     React.createElement('td', { key: 'c' }, r.client_ip),
+                    React.createElement('td', { key: 'ct' }, r.country || ''),
                     React.createElement('td', { key: 'n' }, r.count)
                   ]))
                 )
@@ -103,12 +105,13 @@
               React.createElement('table', null,
                 React.createElement('thead', null,
                   React.createElement('tr', null,
-                    ['qname','count'].map(h => React.createElement('th', { key: h }, h))
+                    ['qname','country','count'].map(h => React.createElement('th', { key: h }, h))
                   )
                 ),
                 React.createElement('tbody', null,
                   blockedStats.map((r, i) => React.createElement('tr', { key: i }, [
                     React.createElement('td', { key: 'q' }, r.qname),
+                    React.createElement('td', { key: 'ct' }, r.country || ''),
                     React.createElement('td', { key: 'n' }, r.count)
                   ]))
                 )

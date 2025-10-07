@@ -23,6 +23,7 @@ func (s *Service) HandleDNSLog(log d.DnsLogObj) {
 	_ = s.db.InsertQueryLog(infra.QueryLogRow{
 		TimeRFC3339: log.TimeRFC3339,
 		ClientIP:    log.ClientIP,
+		Country:     log.CountryZH,
 		Proto:       log.Protocol,
 		QID:         int64(log.ID),
 		QName:       log.QName,

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	geoip2 "github.com/oschwald/geoip2-golang"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -25,15 +27,21 @@ type BlockManager struct {
 	sourceURLs        []string
 	whitelistPatterns []string
 	dataDir           string
+	geoipURL          string
+	geoDBReady        bool
+	geoDBPath         string
+	geoDB             *geoip2.Reader
 }
 
 func NewBlockManager(envPath string) *BlockManager {
 	cfg, _ := LoadConfig(envPath)
 	var urls []string
 	var whitelist []string
+	var geoURL string
 	if cfg != nil {
 		urls = append(urls, cfg.Block.URLs...)
 		whitelist = append(whitelist, cfg.Block.WhiteList...)
+		geoURL = cfg.Block.GeoIP2URL
 	}
 	bm := &BlockManager{
 		blacklistExactSet: make(map[string]struct{}),
@@ -41,6 +49,8 @@ func NewBlockManager(envPath string) *BlockManager {
 		sourceURLs:        urls,
 		whitelistPatterns: whitelist,
 		dataDir:           filepath.Join("block"),
+		geoipURL:          geoURL,
+		geoDBPath:         filepath.Join("block", "Country.mmdb"),
 	}
 	_ = os.MkdirAll(bm.dataDir, 0o755)
 	bm.compileWhitelist()
@@ -121,8 +131,12 @@ func (b *BlockManager) UpdateNow() {
 }
 
 func (b *BlockManager) StartScheduler(stopCh <-chan struct{}) {
+	// domain blocklists update once at start
 	go b.UpdateNow()
+	// geoip db update once at start
+	go b.UpdateGeoIPNow()
 	go func() {
+		// keep daily schedule for domain blocklists (06:00/12:00/18:00/24:00)
 		for {
 			next := nextRunTime()
 			timer := time.NewTimer(time.Until(next))
@@ -133,6 +147,19 @@ func (b *BlockManager) StartScheduler(stopCh <-chan struct{}) {
 				if !timer.Stop() {
 					<-timer.C
 				}
+				return
+			}
+		}
+	}()
+	go func() {
+		// geoip update every 4 hours
+		ticker := time.NewTicker(4 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				b.UpdateGeoIPNow()
+			case <-stopCh:
 				return
 			}
 		}
@@ -268,4 +295,128 @@ func buildNXDomainResponse(req []byte) ([]byte, error) {
 		Questions: []dnsmessage.Question{q},
 	}
 	return msg.Pack()
+}
+
+// ---- GeoIP2 support ----
+
+// UpdateGeoIPNow downloads the GeoIP2 mmdb and swaps it atomically.
+func (b *BlockManager) UpdateGeoIPNow() {
+	if b.geoipURL == "" {
+		return
+	}
+	tmpPath := b.geoDBPath + ".tmp"
+	if err := b.downloadFile(b.geoipURL, tmpPath); err != nil {
+		return
+	}
+	_ = os.Rename(tmpPath, b.geoDBPath)
+	// open and swap in memory
+	db, err := geoip2.Open(b.geoDBPath)
+	if err != nil {
+		return
+	}
+	b.mu.Lock()
+	if b.geoDB != nil {
+		_ = b.geoDB.Close()
+	}
+	b.geoDB = db
+	b.geoDBReady = true
+	b.mu.Unlock()
+}
+
+func (b *BlockManager) downloadFile(url, outPath string) error {
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+	f, err := os.Create(outPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CountryForIP returns ISO code and Chinese name if available.
+func (b *BlockManager) CountryForIP(ipStr string) (string, string) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return "", ""
+	}
+	b.mu.RLock()
+	ready := b.geoDBReady
+	db := b.geoDB
+	b.mu.RUnlock()
+	if !ready {
+		return "", ""
+	}
+	code, zh := lookupCountryZH(db, ip)
+	return code, zh
+}
+
+// IsClientAllowed returns whether client is allowed based on country whitelist.
+func (b *BlockManager) IsClientAllowed(ipStr string) (bool, string, string) {
+	code, zh := b.CountryForIP(ipStr)
+	switch code {
+	case "CN", "HK", "SG", "JP":
+		return true, code, zhNameOrDefault(code, zh)
+	default:
+		if code == "" {
+			return false, code, ""
+		}
+		return false, code, zhNameOrDefault(code, zh)
+	}
+}
+
+// Helper wrappers to avoid heavy imports in signatures
+type geoip2DB interface{ Close() error }
+
+func geoip2Open(path string) (geoip2DB, error) {
+	// use geoip2 library
+	return geoip2.Open(path)
+}
+
+func lookupCountryZH(db geoip2DB, ip net.IP) (string, string) { return queryCountry(db, ip) }
+
+func zhNameOrDefault(code, zh string) string {
+	if zh != "" {
+		return zh
+	}
+	switch code {
+	case "CN":
+		return "中国"
+	case "HK":
+		return "中国香港"
+	case "SG":
+		return "新加坡"
+	case "JP":
+		return "日本"
+	default:
+		return code
+	}
+}
+
+// queryCountry uses a concrete geoip2.Reader via type assertion.
+func queryCountry(db geoip2DB, ip net.IP) (string, string) {
+	r, ok := db.(*geoip2.Reader)
+	if !ok {
+		return "", ""
+	}
+	rec, err := r.Country(ip)
+	if err != nil || rec == nil || rec.Country.IsoCode == "" {
+		return "", ""
+	}
+	code := rec.Country.IsoCode
+	zh := rec.Country.Names["zh-CN"]
+	if zh == "" {
+		zh = rec.Country.Names["zh"]
+	}
+	return code, zh
 }
