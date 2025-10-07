@@ -14,7 +14,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-type LogEntry struct {
+type DnsLogObj struct {
 	TimeRFC3339 string   `json:"time"`
 	ClientIP    string   `json:"client_ip"`
 	Protocol    string   `json:"proto"`
@@ -39,7 +39,7 @@ type Options struct {
 }
 
 // Start launches UDP and TCP DNS listeners. Calls onLog for every query handled.
-func Start(ctx context.Context, opts Options, onLog func(LogEntry)) error {
+func Start(ctx context.Context, opts Options, onLog func(DnsLogObj)) error {
 	bm := NewBlockManager(opts.EnvPath)
 	stopCh := make(chan struct{})
 	bm.StartScheduler(stopCh)
@@ -82,7 +82,7 @@ type server struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	blockMgr     *BlockManager
-	onLog        func(LogEntry)
+	onLog        func(DnsLogObj)
 }
 
 func (s *server) serveUDP(ctx context.Context) error {
@@ -109,7 +109,7 @@ func (s *server) serveUDP(ctx context.Context) error {
 		copy(data, buf[:n])
 		go func(clientAddr net.Addr, reqBytes []byte) {
 			respBytes, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := s.forwardUDP(reqBytes)
-			entry := LogEntry{
+			entry := DnsLogObj{
 				TimeRFC3339: time.Now().Format(time.RFC3339Nano),
 				ClientIP:    clientIPFromAddr(clientAddr),
 				Protocol:    "udp",
@@ -174,7 +174,7 @@ func (s *server) handleTCPConn(conn net.Conn) {
 	}
 
 	resp, rtt, rcode, qname, qtype, answers, id, wasBlocked, hErr := s.forwardTCP(req)
-	entry := LogEntry{
+	entry := DnsLogObj{
 		TimeRFC3339: time.Now().Format(time.RFC3339Nano),
 		ClientIP:    clientIPFromAddr(conn.RemoteAddr()),
 		Protocol:    "tcp",

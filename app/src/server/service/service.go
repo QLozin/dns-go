@@ -12,26 +12,26 @@ type Service struct{ db *infra.DB }
 
 func New(db *infra.DB) *Service { return &Service{db: db} }
 
-func (s *Service) HandleDNSLog(le d.LogEntry) {
+func (s *Service) HandleDNSLog(log d.DnsLogObj) {
 	rttMs := 0.0
-	if le.RTT != "" {
+	if log.RTT != "" {
 		// format like "1.23ms"
 		var v float64
-		_, _ = fmt.Sscanf(le.RTT, "%fms", &v)
+		_, _ = fmt.Sscanf(log.RTT, "%fms", &v)
 		rttMs = v
 	}
 	_ = s.db.InsertQueryLog(infra.QueryLogRow{
-		TimeRFC3339: le.TimeRFC3339,
-		ClientIP:    le.ClientIP,
-		Proto:       le.Protocol,
-		QID:         int64(le.ID),
-		QName:       le.QName,
-		QType:       le.QType,
-		RCode:       le.RCode,
-		Answers:     d.MarshalAnswers(le.Answers),
+		TimeRFC3339: log.TimeRFC3339,
+		ClientIP:    log.ClientIP,
+		Proto:       log.Protocol,
+		QID:         int64(log.ID),
+		QName:       log.QName,
+		QType:       log.QType,
+		RCode:       log.RCode,
+		Answers:     d.MarshalAnswers(log.Answers),
 		RTTms:       rttMs,
-		Blocked:     le.Blocked,
-		Error:       sql.NullString{String: le.Error, Valid: le.Error != ""},
+		Blocked:     log.Blocked,
+		Error:       sql.NullString{String: log.Error, Valid: log.Error != ""},
 	})
 }
 
