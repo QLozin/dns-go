@@ -17,6 +17,8 @@
       .ok { background: #e6ffe6; color: #0a0; }
       .row { display: flex; gap: 16px; }
       .col { flex: 1; }
+      /* 可滚动日志容器，防止无节制增长 */
+      .logs-container { max-height: 480px; overflow: auto; }
     </style>
   </head>
   <body>
@@ -44,32 +46,37 @@
           return () => clearInterval(t);
         }, [fetchAll]);
 
+        const MAX_LOGS = 100; // 默认显示 100 条
+        const displayedLogs = React.useMemo(() => logs.slice(0, MAX_LOGS), [logs]);
+
         return (
           React.createElement(React.Fragment, null,
             React.createElement('div', { className: 'section' },
               React.createElement('h2', null, 'Query Logs'),
-              React.createElement('table', null,
-                React.createElement('thead', null,
-                  React.createElement('tr', null,
-                    ['time','client','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
+              React.createElement('div', { className: 'logs-container' },
+                React.createElement('table', null,
+                  React.createElement('thead', null,
+                    React.createElement('tr', null,
+                      ['time','client','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
+                    )
+                  ),
+                  React.createElement('tbody', null,
+                    displayedLogs.map((r, i) => React.createElement('tr', { key: i }, [
+                      React.createElement('td', { key: 't' }, r.time),
+                      React.createElement('td', { key: 'c' }, r.client_ip),
+                      React.createElement('td', { key: 'p' }, r.proto),
+                      React.createElement('td', { key: 'id' }, r.id),
+                      React.createElement('td', { key: 'qn' }, r.qname),
+                      React.createElement('td', { key: 'qt' }, r.qtype),
+                      React.createElement('td', { key: 'rc' }, r.rcode),
+                      React.createElement('td', { key: 'an', className: 'muted' }, r.answers),
+                      React.createElement('td', { key: 'rt' }, r.rtt_ms?.toFixed ? r.rtt_ms.toFixed(2) : r.rtt_ms),
+                      React.createElement('td', { key: 'bl' },
+                        React.createElement('span', { className: 'badge ' + (r.blocked ? 'blocked' : 'ok') }, r.blocked ? 'blocked' : 'ok')
+                      ),
+                      React.createElement('td', { key: 'er', className: 'muted' }, r.error || '')
+                    ]))
                   )
-                ),
-                React.createElement('tbody', null,
-                  logs.map((r, i) => React.createElement('tr', { key: i }, [
-                    React.createElement('td', { key: 't' }, r.time),
-                    React.createElement('td', { key: 'c' }, r.client_ip),
-                    React.createElement('td', { key: 'p' }, r.proto),
-                    React.createElement('td', { key: 'id' }, r.id),
-                    React.createElement('td', { key: 'qn' }, r.qname),
-                    React.createElement('td', { key: 'qt' }, r.qtype),
-                    React.createElement('td', { key: 'rc' }, r.rcode),
-                    React.createElement('td', { key: 'an', className: 'muted' }, r.answers),
-                    React.createElement('td', { key: 'rt' }, r.rtt_ms?.toFixed ? r.rtt_ms.toFixed(2) : r.rtt_ms),
-                    React.createElement('td', { key: 'bl' },
-                      React.createElement('span', { className: 'badge ' + (r.blocked ? 'blocked' : 'ok') }, r.blocked ? 'blocked' : 'ok')
-                    ),
-                    React.createElement('td', { key: 'er', className: 'muted' }, r.error || '')
-                  ]))
                 )
               )
             ),
