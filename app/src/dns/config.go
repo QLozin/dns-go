@@ -8,12 +8,17 @@ import (
 
 type Config struct {
 	Block BlockConfig `toml:"block"`
+	Log   LogConfig   `toml:"log"`
 }
 
 type BlockConfig struct {
 	URLs      []string `toml:"urls"`
 	WhiteList []string `toml:"white_list"`
 	GeoIP2URL string   `toml:"geoip2_url"`
+}
+
+type LogConfig struct {
+	Dir string `toml:"dir"`
 }
 
 func LoadConfig(path string) (*Config, error) {

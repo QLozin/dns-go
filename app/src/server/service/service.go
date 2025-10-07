@@ -4,13 +4,28 @@ import (
 	"database/sql"
 	d "dnsgolang/app/src/dns"
 	"dnsgolang/app/src/server/infra"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
-type Service struct{ db *infra.DB }
+type Service struct {
+	db      *infra.DB
+	logDir  string
+	curFile *os.File
+	curDate string
+}
 
 func New(db *infra.DB) *Service { return &Service{db: db} }
+
+func NewWithLogDir(db *infra.DB, dir string) *Service {
+	if dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	return &Service{db: db, logDir: dir}
+}
 
 func (s *Service) HandleDNSLog(log d.DnsLogObj) {
 	rttMs := 0.0
@@ -34,6 +49,9 @@ func (s *Service) HandleDNSLog(log d.DnsLogObj) {
 		Blocked:     log.Blocked,
 		Error:       sql.NullString{String: log.Error, Valid: log.Error != ""},
 	})
+
+	// best-effort file logging
+	s.writeJSONLog(log)
 }
 
 func (s *Service) ListLogs(limit int) (*sql.Rows, error) { return s.db.ListQueryLogs(limit) }
@@ -43,3 +61,91 @@ func (s *Service) TopClients24h() (*sql.Rows, error) {
 }
 
 func (s *Service) BlockedStatsAll() (*sql.Rows, error) { return s.db.BlockedStatsAll() }
+
+// ---- file logging ----
+func (s *Service) writeJSONLog(l d.DnsLogObj) {
+	if s.logDir == "" {
+		return
+	}
+	today := time.Now().Format("2006-01-02")
+	if s.curDate != today || s.curFile == nil {
+		s.rotateByDay(today)
+	}
+	if s.curFile == nil {
+		return
+	}
+	// rotate by size 10MB
+	if fi, err := s.curFile.Stat(); err == nil && fi.Size() >= 10*1024*1024 {
+		s.rotateBySize()
+	}
+	enc := json.NewEncoder(s.curFile)
+	_ = enc.Encode(l)
+}
+
+func (s *Service) rotateByDay(date string) {
+	_ = s.closeCur()
+	s.curDate = date
+	s.cleanupOldDays(3)
+	path := filepath.Join(s.logDir, date+".json")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		s.curFile = f
+	}
+}
+
+func (s *Service) rotateBySize() {
+	if s.curFile == nil {
+		return
+	}
+	_ = s.curFile.Close()
+	base := filepath.Join(s.logDir, s.curDate+".json")
+	// next index
+	idx := 1
+	for {
+		cand := fmt.Sprintf("%s.%d", base, idx)
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			break
+		}
+		idx++
+	}
+	_ = os.Rename(base, fmt.Sprintf("%s.%d", base, idx))
+	f, err := os.OpenFile(base, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		s.curFile = f
+	}
+}
+
+func (s *Service) cleanupOldDays(keep int) {
+	if keep <= 0 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -keep)
+	entries, err := os.ReadDir(s.logDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < len("2006-01-02.json") {
+			continue
+		}
+		dateStr := name[:10]
+		if t, err := time.Parse("2006-01-02", dateStr); err == nil {
+			if t.Before(cutoff) {
+				_ = os.Remove(filepath.Join(s.logDir, name))
+			}
+		}
+	}
+}
+
+func (s *Service) closeCur() error {
+	if s.curFile != nil {
+		err := s.curFile.Close()
+		s.curFile = nil
+		return err
+	}
+	return nil
+}

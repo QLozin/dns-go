@@ -20,7 +20,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
-	svc := service.New(db)
+	// Load config for log dir
+	cfg, _ := dnssrv.LoadConfig("env.toml")
+	logDir := ""
+	if cfg != nil {
+		logDir = cfg.Log.Dir
+	}
+	var svc *service.Service
+	if logDir != "" {
+		svc = service.NewWithLogDir(db, logDir)
+	} else {
+		svc = service.New(db)
+	}
 
 	// Start HTTP server
 	e := echo.New()
