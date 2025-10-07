@@ -26,7 +26,7 @@ func main() {
 	e := echo.New()
 	api.New(e, svc)
 	// Serve static web SPA if present
-	e.Static("/", "web")
+	e.Static("/", "app/web")
 	httpErrCh := make(chan error, 1)
 	go func() { httpErrCh <- e.Start(":8080") }()
 
