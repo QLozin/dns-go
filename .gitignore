@@ -1,1 +1,7 @@
-go.sum
+_*
+*.sql*
+block
+*.txt
+*.mmdb
+*.domains
+logs
