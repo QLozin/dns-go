@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -37,6 +38,19 @@ type Options struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	EnvPath      string
+	Logger       *zap.Logger
+}
+
+type server struct {
+	listenUDP    string
+	listenTCP    string
+	upstreamUDP  string
+	upstreamTCP  string
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+	blockMgr     *BlockManager
+	onLog        func(DnsLogObj)
+	logger       *zap.Logger
 }
 
 // Start launches UDP and TCP DNS listeners. Calls onLog for every query handled.
@@ -54,6 +68,7 @@ func Start(ctx context.Context, opts Options, onLog func(DnsLogObj)) error {
 		writeTimeout: opts.WriteTimeout,
 		blockMgr:     bm,
 		onLog:        onLog,
+		logger:       opts.Logger,
 	}
 
 	udpErrCh := make(chan error, 1)
@@ -73,17 +88,6 @@ func Start(ctx context.Context, opts Options, onLog func(DnsLogObj)) error {
 		close(stopCh)
 		return err
 	}
-}
-
-type server struct {
-	listenUDP    string
-	listenTCP    string
-	upstreamUDP  string
-	upstreamTCP  string
-	readTimeout  time.Duration
-	writeTimeout time.Duration
-	blockMgr     *BlockManager
-	onLog        func(DnsLogObj)
 }
 
 func (s *server) serveUDP(ctx context.Context) error {
@@ -131,8 +135,9 @@ func (s *server) serveUDP(ctx context.Context) error {
 						RTT:         "0.00ms",
 						Blocked:     true,
 					}
-					if s.onLog != nil {
-						s.onLog(entry)
+					if s.logger != nil {
+						entryJSON, _ := json.Marshal(entry)
+						s.logger.Info(string(entryJSON))
 					}
 					if resp != nil {
 						_ = s.writePacket(pc, clientAddr, resp)

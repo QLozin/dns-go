@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type Service struct {
@@ -16,15 +18,22 @@ type Service struct {
 	logDir  string
 	curFile *os.File
 	curDate string
+	logger  *zap.Logger
 }
 
-func New(db *infra.DB) *Service { return &Service{db: db} }
+func New(db *infra.DB) *Service {
+	return &Service{db: db, logger: zap.NewNop()}
+}
 
 func NewWithLogDir(db *infra.DB, dir string) *Service {
 	if dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	return &Service{db: db, logDir: dir}
+	return &Service{db: db, logDir: dir, logger: zap.NewNop()}
+}
+
+func NewWithLogger(db *infra.DB, logger *zap.Logger) *Service {
+	return &Service{db: db, logger: logger}
 }
 
 func (s *Service) HandleDNSLog(log d.DnsLogObj) {

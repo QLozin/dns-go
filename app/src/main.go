@@ -4,6 +4,9 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	dnssrv "dnsgolang/app/src/dns"
@@ -12,40 +15,85 @@ import (
 	"dnsgolang/app/src/server/service"
 
 	"github.com/labstack/echo/v4"
+	"go.uber.org/zap"
 )
 
 func main() {
-	// Open DB
+	// 设置环境变量，让子进程使用统一配置
+	os.Setenv("DNSGO_DNS_ENV", "env.toml")
+	os.Setenv("DNSGO_SERVER_ENV", "env.toml")
+
+	// 加载配置
+	cfg, err := dnssrv.LoadConfig("env.toml")
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+
+	// 设置日志目录
+	baseLogDir := ""
+	if cfg != nil {
+		baseLogDir = cfg.Log.Dir
+	}
+
+	// 创建独立的logger
+	dnsLogger := dnssrv.NewDevelopmentLogger()
+	serverLogger := dnssrv.NewDevelopmentLogger()
+	defer dnsLogger.Sync()
+	defer serverLogger.Sync()
+
+	// 打开数据库
 	db, err := infra.Open("sqlite.sql")
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		log.Fatalf("打开数据库失败: %v", err)
 	}
-	// Load config for log dir
-	cfg, _ := dnssrv.LoadConfig("env.toml")
-	logDir := ""
-	if cfg != nil {
-		logDir = cfg.Log.Dir
-	}
+
+	// 创建服务，Server子系统使用server-开头的目录
 	var svc *service.Service
-	if logDir != "" {
-		svc = service.NewWithLogDir(db, logDir)
+	if baseLogDir != "" {
+		serverLogDir := baseLogDir + "/server-logs"
+		svc = service.NewWithLogDir(db, serverLogDir)
 	} else {
-		svc = service.New(db)
+		svc = service.NewWithLogger(db, serverLogger)
 	}
 
-	// Start HTTP server
-	e := echo.New()
-	api.New(e, svc)
-	// Serve static web SPA if present
-	e.Static("/", "app/web")
-	httpErrCh := make(chan error, 1)
-	go func() { httpErrCh <- e.Start(":8080") }()
-
-	// Start DNS server
+	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// 设置信号处理
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		serverLogger.Info("收到停止信号，正在关闭服务器...")
+		cancel()
+	}()
+
+	// 启动HTTP服务器
+	e := echo.New()
+	api.New(e, svc)
+	e.Static("/", "app/web")
+	httpErrCh := make(chan error, 1)
+	go func() {
+		serverLogger.Info("启动HTTP服务器", zap.String("端口", ":8080"))
+		httpErrCh <- e.Start(":8080")
+	}()
+
+	// 启动DNS服务器
 	dnsErrCh := make(chan error, 1)
 	go func() {
+		dnsLogDir := ""
+		if baseLogDir != "" {
+			dnsLogDir = baseLogDir + "/dns-logs"
+		}
+
+		dnsLogger.Info("启动DNS服务器",
+			zap.String("UDP监听", ":53"),
+			zap.String("TCP监听", ":53"),
+			zap.String("上游UDP", "100.90.80.129:5353"),
+			zap.String("上游TCP", "100.90.80.129:5353"),
+			zap.String("日志目录", dnsLogDir))
+
 		err := dnssrv.Start(ctx, dnssrv.Options{
 			ListenUDP:    ":53",
 			ListenTCP:    ":53",
@@ -54,18 +102,22 @@ func main() {
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 5 * time.Second,
 			EnvPath:      "env.toml",
+			Logger:       dnsLogger,
 		}, svc.HandleDNSLog)
 		dnsErrCh <- err
 	}()
 
+	// 等待任一服务器出错或收到停止信号
 	select {
 	case err := <-httpErrCh:
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("http server error: %v", err)
+			serverLogger.Fatal("HTTP服务器错误", zap.Error(err))
 		}
 	case err := <-dnsErrCh:
 		if err != nil {
-			log.Fatalf("dns server error: %v", err)
+			dnsLogger.Fatal("DNS服务器错误", zap.Error(err))
 		}
 	}
+
+	serverLogger.Info("服务器已停止")
 }
