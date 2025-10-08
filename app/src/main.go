@@ -36,8 +36,18 @@ func main() {
 	}
 
 	// 创建独立的logger
-	dnsLogger := dnssrv.NewDevelopmentLogger()
-	serverLogger := dnssrv.NewDevelopmentLogger()
+	var dnsLogger *zap.Logger
+	var serverLogger *zap.Logger
+
+	if baseLogDir != "" {
+		dnsLogDir := baseLogDir + "/dns-logs"
+		dnsLogger = dnssrv.NewLoggerWithFile(dnsLogDir)
+		serverLogDir := baseLogDir + "/server-logs"
+		serverLogger = dnssrv.NewLoggerWithFile(serverLogDir)
+	} else {
+		dnsLogger = dnssrv.NewDevelopmentLogger()
+		serverLogger = dnssrv.NewDevelopmentLogger()
+	}
 	defer dnsLogger.Sync()
 	defer serverLogger.Sync()
 
@@ -47,7 +57,7 @@ func main() {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
 
-	// 创建服务，Server子系统使用server-开头的目录
+	// 创建服务
 	var svc *service.Service
 	if baseLogDir != "" {
 		serverLogDir := baseLogDir + "/server-logs"

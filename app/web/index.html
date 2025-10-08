@@ -17,8 +17,10 @@
       .ok { background: #e6ffe6; color: #0a0; }
       .row { display: flex; gap: 16px; }
       .col { flex: 1; }
-      /* 可滚动日志容器，防止无节制增长 */
       .logs-container { max-height: 480px; overflow: auto; }
+      .loading { text-align: center; padding: 40px; }
+      .error { color: red; padding: 20px; text-align: center; }
+      .retry-btn { padding: 10px 20px; margin-top: 10px; }
     </style>
   </head>
   <body>
@@ -26,168 +28,178 @@
     <div id="app"></div>
 
     <script>
-      const App = () => {
-        const [logs, setLogs] = React.useState([]);
-        const [topClients, setTopClients] = React.useState([]);
-        const [blockedStats, setBlockedStats] = React.useState([]);
-        const [loading, setLoading] = React.useState(true);
-        const [error, setError] = React.useState(null);
-
-        const fetchAll = React.useCallback(async () => {
-          try {
-            setError(null);
-            const [logsRes, topRes, blkRes] = await Promise.all([
-              fetch('/api/logs'), fetch('/api/top-clients'), fetch('/api/blocked-stats')
-            ]);
-            
-            // 检查响应状态
-            if (!logsRes.ok) {
-              console.error('获取日志失败:', logsRes.status, logsRes.statusText);
-              setLogs([]);
-            } else {
-              const logsData = await logsRes.json();
-              setLogs(Array.isArray(logsData) ? logsData : []);
-            }
-            
-            if (!topRes.ok) {
-              console.error('获取客户端统计失败:', topRes.status, topRes.statusText);
-              setTopClients([]);
-            } else {
-              const topData = await topRes.json();
-              setTopClients(Array.isArray(topData) ? topData : []);
-            }
-            
-            if (!blkRes.ok) {
-              console.error('获取阻止统计失败:', blkRes.status, blkRes.statusText);
-              setBlockedStats([]);
-            } else {
-              const blkData = await blkRes.json();
-              setBlockedStats(Array.isArray(blkData) ? blkData : []);
-            }
-            
-            setLoading(false);
-          } catch (error) {
-            console.error('获取数据时发生错误:', error);
-            setError(error.message);
-            setLoading(false);
-          }
-        }, []);
-
-        React.useEffect(() => {
-          fetchAll();
-          const t = setInterval(fetchAll, 5000);
-          return () => clearInterval(t);
-        }, [fetchAll]);
-
-        const MAX_LOGS = 100; // 默认显示 100 条
-        const displayedLogs = React.useMemo(() => {
-          if (!logs || !Array.isArray(logs)) {
-            return [];
-          }
-          return logs.slice(0, MAX_LOGS);
-        }, [logs]);
-
-        // 错误边界组件
-        if (error) {
-          return React.createElement('div', { style: { color: 'red', padding: '20px', textAlign: 'center' } },
-            React.createElement('h2', null, '加载数据时发生错误'),
-            React.createElement('p', null, error),
-            React.createElement('button', { 
-              onClick: () => {
-                setError(null);
-                setLoading(true);
-                fetchAll();
-              },
-              style: { padding: '10px 20px', marginTop: '10px' }
-            }, '重试')
-          );
-        }
-
-        // 加载状态
-        if (loading) {
-          return React.createElement('div', { style: { textAlign: 'center', padding: '40px' } },
-            React.createElement('h2', null, '正在加载数据...')
-          );
-        }
-
-        return (
-          React.createElement(React.Fragment, null,
-            React.createElement('div', { className: 'section' },
-              React.createElement('h2', null, 'Query Logs'),
-              React.createElement('div', { className: 'logs-container' },
-                React.createElement('table', null,
-                  React.createElement('thead', null,
-                    React.createElement('tr', null,
-                      ['time','client','country','proto','id','qname','qtype','rcode','answers','rtt(ms)','blocked','error'].map(h => React.createElement('th', { key: h }, h))
-                    )
-                  ),
-                  React.createElement('tbody', null,
-                    displayedLogs.map((r, i) => React.createElement('tr', { key: i }, [
-                      React.createElement('td', { key: 't' }, r.time),
-                      React.createElement('td', { key: 'c' }, r.client_ip),
-                      React.createElement('td', { key: 'ct' }, r.country || ''),
-                      React.createElement('td', { key: 'p' }, r.proto),
-                      React.createElement('td', { key: 'id' }, r.id),
-                      React.createElement('td', { key: 'qn' }, r.qname),
-                      React.createElement('td', { key: 'qt' }, r.qtype),
-                      React.createElement('td', { key: 'rc' }, r.rcode),
-                      React.createElement('td', { key: 'an', className: 'muted' }, r.answers),
-                      React.createElement('td', { key: 'rt' }, r.rtt_ms?.toFixed ? r.rtt_ms.toFixed(2) : r.rtt_ms),
-                      React.createElement('td', { key: 'bl' },
-                        React.createElement('span', { className: 'badge ' + (r.blocked ? 'blocked' : 'ok') }, r.blocked ? 'blocked' : 'ok')
-                      ),
-                      React.createElement('td', { key: 'er', className: 'muted' }, r.error || '')
-                    ]))
-                  )
-                )
-              )
-            ),
-
-            React.createElement('div', { className: 'section' },
-              React.createElement('h2', null, 'Top 10 Clients (24h)'),
-              React.createElement('table', null,
-                React.createElement('thead', null,
-                  React.createElement('tr', null,
-                    ['client_ip','country','count'].map(h => React.createElement('th', { key: h }, h))
-                  )
-                ),
-                React.createElement('tbody', null,
-                  topClients.map((r, i) => React.createElement('tr', { key: i }, [
-                    React.createElement('td', { key: 'c' }, r.client_ip),
-                    React.createElement('td', { key: 'ct' }, r.country || ''),
-                    React.createElement('td', { key: 'n' }, r.count)
-                  ]))
-                )
-              )
-            ),
-
-            React.createElement('div', { className: 'section' },
-              React.createElement('h2', null, 'Blocked Domains Stats (All time)'),
-              React.createElement('table', null,
-                React.createElement('thead', null,
-                  React.createElement('tr', null,
-                    ['qname','country','count'].map(h => React.createElement('th', { key: h }, h))
-                  )
-                ),
-                React.createElement('tbody', null,
-                  blockedStats.map((r, i) => React.createElement('tr', { key: i }, [
-                    React.createElement('td', { key: 'q' }, r.qname),
-                    React.createElement('td', { key: 'ct' }, r.country || ''),
-                    React.createElement('td', { key: 'n' }, r.count)
-                  ]))
-                )
-              )
-            )
-          )
-        );
+      // 简化的状态管理
+      let state = {
+        logs: [],
+        topClients: [],
+        blockedStats: [],
+        loading: true,
+        error: null
       };
-    </script>
-    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-    <script>
-      ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(App));
+
+      let listeners = [];
+
+      function setState(newState) {
+        state = { ...state, ...newState };
+        listeners.forEach(listener => listener());
+      }
+
+      function subscribe(listener) {
+        listeners.push(listener);
+        return () => {
+          listeners = listeners.filter(l => l !== listener);
+        };
+      }
+
+      // API调用函数
+      async function fetchData() {
+        try {
+          setState({ error: null });
+          
+          const [logsRes, topRes, blkRes] = await Promise.all([
+            fetch('/api/logs'),
+            fetch('/api/top-clients'),
+            fetch('/api/blocked-stats')
+          ]);
+          
+          let logs = [];
+          let topClients = [];
+          let blockedStats = [];
+          
+          if (logsRes.ok) {
+            const logsData = await logsRes.json();
+            logs = Array.isArray(logsData) ? logsData : [];
+          } else {
+            console.error('获取日志失败:', logsRes.status, logsRes.statusText);
+          }
+          
+          if (topRes.ok) {
+            const topData = await topRes.json();
+            topClients = Array.isArray(topData) ? topData : [];
+          } else {
+            console.error('获取客户端统计失败:', topRes.status, topRes.statusText);
+          }
+          
+          if (blkRes.ok) {
+            const blkData = await blkRes.json();
+            blockedStats = Array.isArray(blkData) ? blkData : [];
+          } else {
+            console.error('获取阻止统计失败:', blkRes.status, blkRes.statusText);
+          }
+          
+          setState({ logs, topClients, blockedStats, loading: false });
+        } catch (error) {
+          console.error('获取数据时发生错误:', error);
+          setState({ error: error.message, loading: false });
+        }
+      }
+
+      // 渲染函数
+      function render() {
+        const app = document.getElementById('app');
+        
+        if (state.error) {
+          app.innerHTML = `
+            <div class="error">
+              <h2>加载数据时发生错误</h2>
+              <p>${state.error}</p>
+              <button class="retry-btn" onclick="retry()">重试</button>
+            </div>
+          `;
+          return;
+        }
+        
+        if (state.loading) {
+          app.innerHTML = '<div class="loading"><h2>正在加载数据...</h2></div>';
+          return;
+        }
+        
+        const displayedLogs = state.logs.slice(0, 100);
+        
+        app.innerHTML = `
+          <div class="section">
+            <h2>Query Logs</h2>
+            <div class="logs-container">
+              <table>
+                <thead>
+                  <tr>
+                    <th>time</th><th>client</th><th>country</th><th>proto</th>
+                    <th>id</th><th>qname</th><th>qtype</th><th>rcode</th>
+                    <th>answers</th><th>rtt(ms)</th><th>blocked</th><th>error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${displayedLogs.map(r => `
+                    <tr>
+                      <td>${r.time || ''}</td>
+                      <td>${r.client_ip || ''}</td>
+                      <td>${r.country || ''}</td>
+                      <td>${r.proto || ''}</td>
+                      <td>${r.id || ''}</td>
+                      <td>${r.qname || ''}</td>
+                      <td>${r.qtype || ''}</td>
+                      <td>${r.rcode || ''}</td>
+                      <td class="muted">${r.answers || ''}</td>
+                      <td>${r.rtt_ms ? (typeof r.rtt_ms === 'number' ? r.rtt_ms.toFixed(2) : r.rtt_ms) : ''}</td>
+                      <td><span class="badge ${r.blocked ? 'blocked' : 'ok'}">${r.blocked ? 'blocked' : 'ok'}</span></td>
+                      <td class="muted">${r.error || ''}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          
+          <div class="section">
+            <h2>Top 10 Clients (24h)</h2>
+            <table>
+              <thead>
+                <tr><th>client_ip</th><th>country</th><th>count</th></tr>
+              </thead>
+              <tbody>
+                ${state.topClients.map(r => `
+                  <tr>
+                    <td>${r.client_ip || ''}</td>
+                    <td>${r.country || ''}</td>
+                    <td>${r.count || ''}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          
+          <div class="section">
+            <h2>Blocked Domains Stats (All time)</h2>
+            <table>
+              <thead>
+                <tr><th>qname</th><th>country</th><th>count</th></tr>
+              </thead>
+              <tbody>
+                ${state.blockedStats.map(r => `
+                  <tr>
+                    <td>${r.qname || ''}</td>
+                    <td>${r.country || ''}</td>
+                    <td>${r.count || ''}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        `;
+      }
+
+      // 重试函数
+      function retry() {
+        setState({ error: null, loading: true });
+        fetchData();
+      }
+
+      // 初始化
+      subscribe(render);
+      fetchData();
+      
+      // 每5秒刷新一次数据
+      setInterval(fetchData, 5000);
     </script>
   </body>
-  </html>
-
-
+</html>
