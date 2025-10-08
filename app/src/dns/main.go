@@ -134,7 +134,7 @@ func NewLoggerWithFile(logDir string) *zap.Logger {
 	var fileWriter zapcore.WriteSyncer
 	if logDir != "" {
 		fileWriter = zapcore.AddSync(&lumberjack.Logger{
-			Filename:   logDir + "/dns-2006-01-02 15:04:05.json",
+			Filename:   logDir + "/dns-2006-01-02T15-04-05.json",
 			MaxSize:    5,    // 5MB
 			MaxBackups: 3,    // 保留3个备份
 			MaxAge:     3,    // 保留3天

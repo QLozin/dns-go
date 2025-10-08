@@ -95,9 +95,16 @@ func (s *Service) rotateByDay(date string) {
 	_ = s.closeCur()
 	s.curDate = date
 	s.cleanupOldDays(3)
-	// 使用dns-前缀和日期时间格式
-	path := filepath.Join(s.logDir, "dns-"+date+" 00:00:00.json")
+	// 使用server-前缀和日期时间格式，Windows兼容（替换冒号为连字符）
+	path := filepath.Join(s.logDir, "server-"+date+"T00-00-00.json")
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		// 如果日志目录不存在，尝试创建
+		if os.IsNotExist(err) {
+			os.MkdirAll(s.logDir, 0755)
+			f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		}
+	}
 	if err == nil {
 		s.curFile = f
 	}
@@ -108,7 +115,7 @@ func (s *Service) rotateBySize() {
 		return
 	}
 	_ = s.curFile.Close()
-	base := filepath.Join(s.logDir, "dns-"+s.curDate+" 00:00:00.json")
+	base := filepath.Join(s.logDir, "server-"+s.curDate+"T00-00-00.json")
 	// next index
 	idx := 1
 	for {
@@ -139,12 +146,12 @@ func (s *Service) cleanupOldDays(keep int) {
 			continue
 		}
 		name := e.Name()
-		if len(name) < len("dns-2006-01-02 00:00:00.json") {
+		if len(name) < len("server-2006-01-02T00-00-00.json") {
 			continue
 		}
-		// 匹配dns-前缀的日期格式
-		if len(name) >= 10 && name[:4] == "dns-" {
-			dateStr := name[4:14] // 提取日期部分
+		// 匹配server-前缀的日期格式
+		if len(name) >= 13 && name[:7] == "server-" {
+			dateStr := name[7:17] // 提取日期部分
 			if t, err := time.Parse("2006-01-02", dateStr); err == nil {
 				if t.Before(cutoff) {
 					_ = os.Remove(filepath.Join(s.logDir, name))
