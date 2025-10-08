@@ -60,6 +60,7 @@ func NewBlockManager(envPath string) *BlockManager {
 func (b *BlockManager) compileWhitelist() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	// 清空切片
 	b.whitelistRegexps = b.whitelistRegexps[:0]
 	for _, pat := range b.whitelistPatterns {
 		rx := pat
@@ -411,6 +412,9 @@ func queryCountry(db geoip2DB, ip net.IP) (string, string) {
 	}
 	rec, err := r.Country(ip)
 	if err != nil || rec == nil || rec.Country.IsoCode == "" {
+		if IsPrivateIP(ip) {
+			return "Iner", fmt.Sprintf("内网IP %s", ip.String())
+		}
 		return "", ""
 	}
 	code := rec.Country.IsoCode
@@ -419,4 +423,21 @@ func queryCountry(db geoip2DB, ip net.IP) (string, string) {
 		zh = rec.Country.Names["zh"]
 	}
 	return code, zh
+}
+func IsPrivateIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	customPrivateIPRanges := []*net.IPNet{
+		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("100.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+	}
+	for _, ipStr := range customPrivateIPRanges {
+		if ipStr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
