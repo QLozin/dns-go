@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/signal"
@@ -110,6 +111,17 @@ func main() {
 
 	// 创建HTTP服务器
 	e := echo.New()
+
+	// 添加CORS中间件
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Response().Header().Set("Access-Control-Allow-Origin", "*")
+			c.Response().Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			c.Response().Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			return next(c)
+		}
+	})
+
 	api.New(e, svc)
 
 	// 提供静态web文件
@@ -121,7 +133,7 @@ func main() {
 	go func() {
 		<-sigCh
 		logger.Info("收到停止信号，正在关闭HTTP服务器...")
-		if err := e.Shutdown(nil); err != nil {
+		if err := e.Shutdown(context.Background()); err != nil {
 			logger.Error("关闭HTTP服务器失败", zap.Error(err))
 		}
 	}()

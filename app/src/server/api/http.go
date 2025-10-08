@@ -21,7 +21,10 @@ func New(e *echo.Echo, svc *service.Service) *API {
 func (a *API) getLogs(c echo.Context) error {
 	rows, err := a.svc.ListLogs(500)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+			"data":  []interface{}{},
+		})
 	}
 	defer rows.Close()
 	type row struct {
@@ -58,7 +61,10 @@ func (a *API) getLogs(c echo.Context) error {
 func (a *API) getTopClients(c echo.Context) error {
 	rows, err := a.svc.TopClients24h()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+			"data":  []interface{}{},
+		})
 	}
 	defer rows.Close()
 	type row struct {
@@ -80,7 +86,10 @@ func (a *API) getTopClients(c echo.Context) error {
 func (a *API) getBlockedStats(c echo.Context) error {
 	rows, err := a.svc.BlockedStatsAll()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return c.JSON(http.StatusInternalServerError, map[string]interface{}{
+			"error": err.Error(),
+			"data":  []interface{}{},
+		})
 	}
 	defer rows.Close()
 	type row struct {

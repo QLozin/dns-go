@@ -30,14 +30,47 @@
         const [logs, setLogs] = React.useState([]);
         const [topClients, setTopClients] = React.useState([]);
         const [blockedStats, setBlockedStats] = React.useState([]);
+        const [loading, setLoading] = React.useState(true);
+        const [error, setError] = React.useState(null);
 
         const fetchAll = React.useCallback(async () => {
-          const [logsRes, topRes, blkRes] = await Promise.all([
-            fetch('/api/logs'), fetch('/api/top-clients'), fetch('/api/blocked-stats')
-          ]);
-          setLogs(await logsRes.json());
-          setTopClients(await topRes.json());
-          setBlockedStats(await blkRes.json());
+          try {
+            setError(null);
+            const [logsRes, topRes, blkRes] = await Promise.all([
+              fetch('/api/logs'), fetch('/api/top-clients'), fetch('/api/blocked-stats')
+            ]);
+            
+            // 检查响应状态
+            if (!logsRes.ok) {
+              console.error('获取日志失败:', logsRes.status, logsRes.statusText);
+              setLogs([]);
+            } else {
+              const logsData = await logsRes.json();
+              setLogs(Array.isArray(logsData) ? logsData : []);
+            }
+            
+            if (!topRes.ok) {
+              console.error('获取客户端统计失败:', topRes.status, topRes.statusText);
+              setTopClients([]);
+            } else {
+              const topData = await topRes.json();
+              setTopClients(Array.isArray(topData) ? topData : []);
+            }
+            
+            if (!blkRes.ok) {
+              console.error('获取阻止统计失败:', blkRes.status, blkRes.statusText);
+              setBlockedStats([]);
+            } else {
+              const blkData = await blkRes.json();
+              setBlockedStats(Array.isArray(blkData) ? blkData : []);
+            }
+            
+            setLoading(false);
+          } catch (error) {
+            console.error('获取数据时发生错误:', error);
+            setError(error.message);
+            setLoading(false);
+          }
         }, []);
 
         React.useEffect(() => {
@@ -47,7 +80,35 @@
         }, [fetchAll]);
 
         const MAX_LOGS = 100; // 默认显示 100 条
-        const displayedLogs = React.useMemo(() => logs.slice(0, MAX_LOGS), [logs]);
+        const displayedLogs = React.useMemo(() => {
+          if (!logs || !Array.isArray(logs)) {
+            return [];
+          }
+          return logs.slice(0, MAX_LOGS);
+        }, [logs]);
+
+        // 错误边界组件
+        if (error) {
+          return React.createElement('div', { style: { color: 'red', padding: '20px', textAlign: 'center' } },
+            React.createElement('h2', null, '加载数据时发生错误'),
+            React.createElement('p', null, error),
+            React.createElement('button', { 
+              onClick: () => {
+                setError(null);
+                setLoading(true);
+                fetchAll();
+              },
+              style: { padding: '10px 20px', marginTop: '10px' }
+            }, '重试')
+          );
+        }
+
+        // 加载状态
+        if (loading) {
+          return React.createElement('div', { style: { textAlign: 'center', padding: '40px' } },
+            React.createElement('h2', null, '正在加载数据...')
+          );
+        }
 
         return (
           React.createElement(React.Fragment, null,
