@@ -47,7 +47,7 @@ func NewLoggerWithFile(logDir string) *zap.Logger {
 	var fileWriter zapcore.WriteSyncer
 	if logDir != "" {
 		fileWriter = zapcore.AddSync(&lumberjack.Logger{
-			Filename:   logDir + "/server.log",
+			Filename:   logDir + "/server-2006-01-02 15:04:05.json",
 			MaxSize:    5,    // 5MB
 			MaxBackups: 3,    // 保留3个备份
 			MaxAge:     3,    // 保留3天
@@ -93,8 +93,8 @@ func main() {
 		envPath = "env.toml" // 默认配置
 	}
 
-	// 设置日志目录，Server子系统以server-开头
-	logDir := "./logs/server-logs"
+	// 设置日志目录，Server子系统直接使用配置目录，不创建子文件夹
+	logDir := "./logs"
 
 	// 创建Server子系统专用的logger（文件+控制台）
 	logger := NewLoggerWithFile(logDir)

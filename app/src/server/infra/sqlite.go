@@ -70,7 +70,7 @@ type QueryLogRow struct {
 
 func (db *DB) InsertQueryLog(r QueryLogRow) error {
 	_, err := db.Exec(`INSERT INTO query_logs(time_rfc3339, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.TimeRFC3339, r.ClientIP, nullEmpty(r.Country), r.Proto, r.QID, r.QName, r.QType, r.RCode, r.Answers, r.RTTms, boolToInt(r.Blocked), nullStr(r.Error))
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, r.TimeRFC3339, r.ClientIP, nullEmpty(r.Country), r.Proto, r.QID, r.QName, r.QType, r.RCode, r.Answers, r.RTTms, boolToInt(r.Blocked), nullStr(r.Error))
 	return err
 }
 

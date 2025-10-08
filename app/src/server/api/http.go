@@ -55,6 +55,10 @@ func (a *API) getLogs(c echo.Context) error {
 		}
 		out = append(out, r)
 	}
+	// 确保返回空数组而不是null
+	if out == nil {
+		out = []row{}
+	}
 	return c.JSON(http.StatusOK, out)
 }
 
@@ -80,6 +84,10 @@ func (a *API) getTopClients(c echo.Context) error {
 		}
 		out = append(out, r)
 	}
+	// 确保返回空数组而不是null
+	if out == nil {
+		out = []row{}
+	}
 	return c.JSON(http.StatusOK, out)
 }
 
@@ -104,6 +112,10 @@ func (a *API) getBlockedStats(c echo.Context) error {
 			return err
 		}
 		out = append(out, r)
+	}
+	// 确保返回空数组而不是null
+	if out == nil {
+		out = []row{}
 	}
 	return c.JSON(http.StatusOK, out)
 }

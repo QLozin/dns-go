@@ -40,10 +40,9 @@ func main() {
 	var serverLogger *zap.Logger
 
 	if baseLogDir != "" {
-		dnsLogDir := baseLogDir + "/dns-logs"
-		dnsLogger = dnssrv.NewLoggerWithFile(dnsLogDir)
-		serverLogDir := baseLogDir + "/server-logs"
-		serverLogger = dnssrv.NewLoggerWithFile(serverLogDir)
+		// 直接使用配置的日志目录，不创建子文件夹
+		dnsLogger = dnssrv.NewLoggerWithFile(baseLogDir)
+		serverLogger = dnssrv.NewLoggerWithFile(baseLogDir)
 	} else {
 		dnsLogger = dnssrv.NewDevelopmentLogger()
 		serverLogger = dnssrv.NewDevelopmentLogger()
@@ -60,8 +59,8 @@ func main() {
 	// 创建服务
 	var svc *service.Service
 	if baseLogDir != "" {
-		serverLogDir := baseLogDir + "/server-logs"
-		svc = service.NewWithLogDir(db, serverLogDir)
+		// 直接使用配置的日志目录，不创建子文件夹
+		svc = service.NewWithLogDir(db, baseLogDir)
 	} else {
 		svc = service.NewWithLogger(db, serverLogger)
 	}
@@ -92,17 +91,12 @@ func main() {
 	// 启动DNS服务器
 	dnsErrCh := make(chan error, 1)
 	go func() {
-		dnsLogDir := ""
-		if baseLogDir != "" {
-			dnsLogDir = baseLogDir + "/dns-logs"
-		}
-
 		dnsLogger.Info("启动DNS服务器",
 			zap.String("UDP监听", ":53"),
 			zap.String("TCP监听", ":53"),
 			zap.String("上游UDP", "100.90.80.129:5353"),
 			zap.String("上游TCP", "100.90.80.129:5353"),
-			zap.String("日志目录", dnsLogDir))
+			zap.String("日志目录", baseLogDir))
 
 		err := dnssrv.Start(ctx, dnssrv.Options{
 			ListenUDP:    ":53",
