@@ -366,7 +366,7 @@ func (b *BlockManager) CountryForIP(ipStr string) (string, string) {
 func (b *BlockManager) IsClientAllowed(ipStr string) (bool, string, string) {
 	code, zh := b.CountryForIP(ipStr)
 	switch code {
-	case "CN", "HK", "SG", "JP":
+	case "CN", "HK", "SG", "JP", "Iner":
 		return true, code, zhNameOrDefault(code, zh)
 	default:
 		if code == "" {
