@@ -4,14 +4,41 @@ import (
 	"database/sql"
 	"dnsgolang/app/src/server/service"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
+	"go.uber.org/zap"
 )
 
-type API struct{ svc *service.Service }
+type API struct {
+	svc    *service.Service
+	logger *zap.Logger
+}
 
-func New(e *echo.Echo, svc *service.Service) *API {
-	a := &API{svc: svc}
+func New(e *echo.Echo, svc *service.Service, logger *zap.Logger) *API {
+	a := &API{svc: svc, logger: logger}
+
+	// 添加日志中间件
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			start := time.Now()
+			err := next(c)
+			duration := time.Since(start)
+
+			// 记录API请求日志
+			a.logger.Info("API请求",
+				zap.String("method", c.Request().Method),
+				zap.String("path", c.Request().URL.Path),
+				zap.String("remote_addr", c.Request().RemoteAddr),
+				zap.Int("status", c.Response().Status),
+				zap.Duration("duration", duration),
+				zap.String("user_agent", c.Request().UserAgent()),
+			)
+
+			return err
+		}
+	})
+
 	e.GET("/api/logs", a.getLogs)
 	e.GET("/api/top-clients", a.getTopClients)
 	e.GET("/api/blocked-stats", a.getBlockedStats)

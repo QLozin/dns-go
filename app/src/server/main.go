@@ -122,7 +122,7 @@ func main() {
 		}
 	})
 
-	api.New(e, svc)
+	api.New(e, svc, logger)
 
 	// 提供静态web文件
 	e.Static("/", "app/web")

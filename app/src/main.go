@@ -75,7 +75,7 @@ func main() {
 
 	// 启动HTTP服务器
 	e := echo.New()
-	api.New(e, svc)
+	api.New(e, svc, serverLogger)
 	e.Static("/", "app/web")
 	httpErrCh := make(chan error, 1)
 	go func() {
