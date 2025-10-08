@@ -3,11 +3,14 @@ package dns
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,12 +52,15 @@ type server struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	blockMgr     *BlockManager
-	onLog        func(DnsLogObj)
 	logger       *zap.Logger
+	db           *sql.DB
+	logDir       string
+	curFile      *os.File
+	curDate      string
 }
 
-// Start launches UDP and TCP DNS listeners. Calls onLog for every query handled.
-func Start(ctx context.Context, opts Options, onLog func(DnsLogObj)) error {
+// Start launches UDP and TCP DNS listeners. Handles logging internally.
+func Start(ctx context.Context, opts Options, db *sql.DB, logDir string) error {
 	bm := NewBlockManager(opts.EnvPath)
 	stopCh := make(chan struct{})
 	bm.StartScheduler(stopCh)
@@ -67,8 +73,9 @@ func Start(ctx context.Context, opts Options, onLog func(DnsLogObj)) error {
 		readTimeout:  opts.ReadTimeout,
 		writeTimeout: opts.WriteTimeout,
 		blockMgr:     bm,
-		onLog:        onLog,
 		logger:       opts.Logger,
+		db:           db,
+		logDir:       logDir,
 	}
 
 	udpErrCh := make(chan error, 1)
@@ -162,9 +169,7 @@ func (s *server) serveUDP(ctx context.Context) error {
 			if hErr != nil {
 				entry.Error = hErr.Error()
 			}
-			if s.onLog != nil {
-				s.onLog(entry)
-			}
+			s.handleDNSLog(entry)
 			if respBytes != nil {
 				_ = s.writePacket(pc, clientAddr, respBytes)
 			}
@@ -232,9 +237,7 @@ func (s *server) handleTCPConn(conn net.Conn) {
 				RTT:         "0.00ms",
 				Blocked:     true,
 			}
-			if s.onLog != nil {
-				s.onLog(entry)
-			}
+			s.handleDNSLog(entry)
 			if resp != nil {
 				_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 				outLen := []byte{byte(len(resp) >> 8), byte(len(resp))}
@@ -262,9 +265,7 @@ func (s *server) handleTCPConn(conn net.Conn) {
 	if hErr != nil {
 		entry.Error = hErr.Error()
 	}
-	if s.onLog != nil {
-		s.onLog(entry)
-	}
+	s.handleDNSLog(entry)
 	if resp == nil {
 		return
 	}
@@ -412,4 +413,158 @@ func (s *server) writePacket(pc net.PacketConn, addr net.Addr, data []byte) erro
 func MarshalAnswers(answers []string) string {
 	b, _ := json.Marshal(answers)
 	return string(b)
+}
+
+// handleDNSLog 处理DNS查询日志，同时写入数据库和文件
+func (s *server) handleDNSLog(log DnsLogObj) {
+	// 写入数据库
+	s.insertQueryLog(log)
+
+	// 写入文件
+	s.writeJSONLog(log)
+}
+
+// insertQueryLog 将DNS查询日志插入数据库
+func (s *server) insertQueryLog(log DnsLogObj) {
+	if s.db == nil {
+		return
+	}
+
+	rttMs := 0.0
+	if log.RTT != "" {
+		// format like "1.23ms"
+		var v float64
+		_, _ = fmt.Sscanf(log.RTT, "%fms", &v)
+		rttMs = v
+	}
+
+	query := `INSERT INTO query_logs (time, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error) 
+			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := s.db.Exec(query,
+		log.TimeRFC3339,
+		log.ClientIP,
+		log.CountryZH,
+		log.Protocol,
+		int64(log.ID),
+		log.QName,
+		log.QType,
+		log.RCode,
+		MarshalAnswers(log.Answers),
+		rttMs,
+		log.Blocked,
+		log.Error,
+	)
+
+	if err != nil {
+		s.logger.Error("插入查询日志失败", zap.Error(err))
+	}
+}
+
+// writeJSONLog 将DNS查询日志写入JSON文件
+func (s *server) writeJSONLog(log DnsLogObj) {
+	if s.logDir == "" {
+		return
+	}
+
+	today := time.Now().Format("2006-01-02")
+	if s.curDate != today || s.curFile == nil {
+		s.rotateByDay(today)
+	}
+
+	if s.curFile == nil {
+		return
+	}
+
+	// rotate by size 10MB
+	if fi, err := s.curFile.Stat(); err == nil && fi.Size() >= 10*1024*1024 {
+		s.rotateBySize()
+	}
+
+	enc := json.NewEncoder(s.curFile)
+	_ = enc.Encode(log)
+}
+
+// rotateByDay 按日期轮转日志文件
+func (s *server) rotateByDay(date string) {
+	_ = s.closeCur()
+	s.curDate = date
+	s.cleanupOldDays(3)
+
+	// 使用dns-前缀和日期时间格式，Windows兼容（替换冒号为连字符）
+	path := filepath.Join(s.logDir, "dns-"+date+"T00-00-00.json")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		// 如果日志目录不存在，尝试创建
+		if os.IsNotExist(err) {
+			os.MkdirAll(s.logDir, 0755)
+			f, err = os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		}
+	}
+	if err == nil {
+		s.curFile = f
+	}
+}
+
+// rotateBySize 按大小轮转日志文件
+func (s *server) rotateBySize() {
+	if s.curFile == nil {
+		return
+	}
+	_ = s.curFile.Close()
+	base := filepath.Join(s.logDir, "dns-"+s.curDate+"T00-00-00.json")
+	// next index
+	idx := 1
+	for {
+		cand := fmt.Sprintf("%s.%d", base, idx)
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			break
+		}
+		idx++
+	}
+	_ = os.Rename(base, fmt.Sprintf("%s.%d", base, idx))
+	f, err := os.OpenFile(base, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		s.curFile = f
+	}
+}
+
+// cleanupOldDays 清理旧的日志文件
+func (s *server) cleanupOldDays(keep int) {
+	if keep <= 0 {
+		return
+	}
+	cutoff := time.Now().AddDate(0, 0, -keep)
+	entries, err := os.ReadDir(s.logDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < len("dns-2006-01-02T00-00-00.json") {
+			continue
+		}
+		// 匹配dns-前缀的日期格式
+		if len(name) >= 10 && name[:4] == "dns-" {
+			dateStr := name[4:14] // 提取日期部分
+			if t, err := time.Parse("2006-01-02", dateStr); err == nil {
+				if t.Before(cutoff) {
+					_ = os.Remove(filepath.Join(s.logDir, name))
+				}
+			}
+		}
+	}
+}
+
+// closeCur 关闭当前日志文件
+func (s *server) closeCur() error {
+	if s.curFile != nil {
+		err := s.curFile.Close()
+		s.curFile = nil
+		return err
+	}
+	return nil
 }

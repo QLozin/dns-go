@@ -40,8 +40,9 @@ func main() {
 	var serverLogger *zap.Logger
 
 	if baseLogDir != "" {
-		// 直接使用配置的日志目录，不创建子文件夹
+		// DNS子系统使用配置的日志目录
 		dnsLogger = dnssrv.NewLoggerWithFile(baseLogDir)
+		// Server子系统使用独立的日志目录
 		serverLogger = dnssrv.NewLoggerWithFile(baseLogDir)
 	} else {
 		dnsLogger = dnssrv.NewDevelopmentLogger()
@@ -56,14 +57,8 @@ func main() {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
 
-	// 创建服务
-	var svc *service.Service
-	if baseLogDir != "" {
-		// 直接使用配置的日志目录，不创建子文件夹
-		svc = service.NewWithLogDir(db, baseLogDir)
-	} else {
-		svc = service.NewWithLogger(db, serverLogger)
-	}
+	// 创建服务（Server子系统只负责API，不处理DNS日志）
+	svc := service.New(db)
 
 	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
@@ -107,7 +102,7 @@ func main() {
 			WriteTimeout: 5 * time.Second,
 			EnvPath:      "env.toml",
 			Logger:       dnsLogger,
-		}, svc.HandleDNSLog)
+		}, db.DB, baseLogDir)
 		dnsErrCh <- err
 	}()
 

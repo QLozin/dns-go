@@ -59,6 +59,7 @@ func main() {
 		zap.String("上游TCP", "100.90.80.129:5353"),
 		zap.String("日志目录", logDir))
 
+	// DNS子系统现在直接处理日志，不需要回调函数
 	err = Start(ctx, Options{
 		ListenUDP:    ":53",
 		ListenTCP:    ":53",
@@ -68,20 +69,7 @@ func main() {
 		WriteTimeout: 5 * time.Second,
 		EnvPath:      "env.toml",
 		Logger:       logger,
-	}, func(logObj DnsLogObj) {
-		// DNS日志处理函数
-		logger.Info("DNS查询",
-			zap.String("客户端IP", logObj.ClientIP),
-			zap.String("国家", logObj.CountryZH),
-			zap.String("协议", logObj.Protocol),
-			zap.String("查询域名", logObj.QName),
-			zap.String("查询类型", logObj.QType),
-			zap.String("响应码", logObj.RCode),
-			zap.String("响应时间", logObj.RTT),
-			zap.Bool("被阻止", logObj.Blocked),
-			zap.String("错误", logObj.Error),
-		)
-	})
+	}, nil, logDir) // 传递 nil 作为数据库，因为独立运行时不需要数据库
 
 	if err != nil {
 		logger.Fatal("DNS服务器启动失败", zap.Error(err))
