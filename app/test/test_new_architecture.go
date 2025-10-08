@@ -35,10 +35,10 @@ func main() {
 	// 创建DNS服务器实例来测试日志处理
 	ctx := context.Background()
 	opts := dns.Options{
-		ListenUDP:    ":5353", // 使用非标准端口避免权限问题
-		ListenTCP:    ":5353",
-		UpstreamUDP:  "8.8.8.8:53",
-		UpstreamTCP:  "8.8.8.8:53",
+		ListenUDP:    ":53", // 使用非标准端口避免权限问题
+		ListenTCP:    ":53",
+		UpstreamUDP:  "100.90.80.129:5353",
+		UpstreamTCP:  "100.90.80.129:5353",
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 		EnvPath:      "env.toml",

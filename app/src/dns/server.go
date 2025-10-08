@@ -438,7 +438,7 @@ func (s *server) insertQueryLog(log DnsLogObj) {
 		rttMs = v
 	}
 
-	query := `INSERT INTO query_logs (time, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error) 
+	query := `INSERT INTO query_logs (time_rfc3339, client_ip, country, proto, qid, qname, qtype, rcode, answers, rtt_ms, blocked, error) 
 			  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.Exec(query,
