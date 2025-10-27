@@ -322,7 +322,7 @@ func (this *Blocker) isWhiteDomain(domain string) bool {
 
 }
 
-func (this *Blocker) isBlocedDomain(domain string) bool {
+func (this *Blocker) isBlockedDomain(domain string) bool {
 
 	domain = SimpleNormalizeDomain(domain)
 	this.mutexes.domainSet.RLock()
@@ -339,11 +339,14 @@ func (this *Blocker) isBlocedDomain(domain string) bool {
 	return false
 }
 
-func (this *Blocker) isIPAllowed(ip net.IP) bool {
-	code, _ := this.SearchIPCountry(ip)
-	code = strings.ToLower(code)
-	if code == "cn" {
+func (this *Blocker) isCountryAllowed(countryCode string) bool {
+	countryCode = strings.ToLower(countryCode)
+	if countryCode == "cn"  {
 		return true
 	}
-	return false
+	return false	
+}
+
+func (this *Blocker) isIPAllowed(ip net.IP) bool {
+	return true
 }

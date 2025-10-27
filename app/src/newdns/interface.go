@@ -28,6 +28,7 @@ type DnsLog struct {
 	GeoCountry  string `json:"geo_country"`
 	MsgId       int    `json:"msgId"`
 	Error       string `json:"error"`
+	RTT         string `json:"rtt"`
 }
 
 // 基础配置
