@@ -3,6 +3,7 @@ package newdns
 import (
 	"context"
 	"database/sql"
+	"net"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -41,7 +42,7 @@ type Config struct {
 
 type ServerConfig struct {
 	UdpPort      string        `toml:"udp_port"`
-	UpstreamDNS  string        `toml:"upstream_dns"`
+	UpstreamDNS  []string      `toml:"upstream_dns"`
 	ReadTimeout  time.Duration `toml:"read_timeout"`
 	WriteTimeout time.Duration `toml:"write_timeout"`
 }
@@ -85,6 +86,7 @@ type Server struct {
 	stopCh         chan struct{}
 	ctx            context.Context
 	blockerManager *Blocker
+	upstreamDNS    []net.UDPAddr
 }
 
 type Blocker struct {

@@ -32,8 +32,28 @@ func (this *Server) Start() error {
 		this.Stop()
 		return err
 	}
+	if err := this.resolveUpstreamDNS(); err != nil {
+		this.Stop()
+		return err
+	}
 	udpErrCh := make(chan error, 1)
 
+	return nil
+}
+
+func (this *Server) resolveUpstreamDNS() error {
+	this.upstreamDNS = make([]net.UDPAddr, len(this.ServerConfig.UpstreamDNS))
+	for _, upstrm := range this.ServerConfig.UpstreamDNS {
+		addr, err := net.ResolveUDPAddr("udp", upstrm)
+		if err != nil {
+			this.Logger.Error("解析上游DNS失败", zap.Error(err))
+			continue
+		}
+		this.upstreamDNS = append(this.upstreamDNS, *addr)
+	}
+	if len(this.upstreamDNS) == 0 {
+		return fmt.Errorf("没有可用的上游DNS %s", strings.Join(this.ServerConfig.UpstreamDNS, ","))
+	}
 	return nil
 }
 
@@ -89,12 +109,13 @@ func (this *Server) serveAtUDP(ctx context.Context) error {
 		}
 		data := make([]byte, copiedNumber)
 		copy(data, buffer[:copiedNumber])
-		go this.processUDPRequest(addr, data, packet)
+		go this.processUDPRequest(ctx, addr, data, packet)
 	}
 
 }
 
-func (this *Server) processUDPRequest(clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
+func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
+	msgId := ctx.Value("msgId").(int)
 	blocker := this.blockerManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
@@ -110,6 +131,7 @@ func (this *Server) processUDPRequest(clientAddr net.Addr, reqBytes []byte, pack
 		return fmt.Errorf("解析请求头失败: %w", err)
 	}
 	ques, err := parser.Question()
+	qtype := DnsReqTypeToString(ques.Type)
 	if err != nil {
 		this.Logger.Error("解析请求问题失败", zap.Error(err))
 		return fmt.Errorf("解析请求问题失败: %w", err)
@@ -117,17 +139,17 @@ func (this *Server) processUDPRequest(clientAddr net.Addr, reqBytes []byte, pack
 	qname := ques.Name.String()
 	qname = strings.ToLower(qname)
 	qname = strings.TrimSuffix(qname, ".")
+	msg := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
+		Questions: []dnsmessage.Question{ques},
+	}
+	nxdomain, err := msg.Pack()
+	if err != nil {
+		this.Logger.Error("打包NXDOMAIN失败", zap.Error(err))
+		return fmt.Errorf("打包NXDOMAIN失败: %w", err)
+	}
 	if qname != "" && !blocker.isIPAllowed(clientIP) || !blocker.isCountryAllowed(clientCountry) || (blocker.isBlockedDomain(qname) && !blocker.isWhiteDomain(qname)) {
-		msg := dnsmessage.Message{
-			Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
-			Questions: []dnsmessage.Question{ques},
-		}
-		nxdomain, err := msg.Pack()
-		if err != nil {
-			this.Logger.Error("打包NXDOMAIN失败", zap.Error(err))
-			return fmt.Errorf("打包NXDOMAIN失败: %w", err)
-		}
-		dnslog := this.buildNXDomainDNSLog()
+		dnslog := this.buildNXDomainDNSLog(msgId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
 		dnslog.GeoCountry = clientCountryName
 		// TODO 插入DNS日志到数据库，暂时先空着
@@ -135,18 +157,63 @@ func (this *Server) processUDPRequest(clientAddr net.Addr, reqBytes []byte, pack
 		return this.writePacket(packet, clientAddr, nxdomain)
 
 	}
+	resp, rtt, err := this.forwardUDP(ctx, reqBytes)
+	if err != nil {
+		this.Logger.Error("转发请求失败", zap.Error(err))
+		return fmt.Errorf("转发请求失败: %w", err)
+	}
+	dnslog := DnsLog{
+		Time:        time.Now().Format("YYYY-MM-DD HH:mm:ss"),
+		Protocol:    "udp",
+		RCode:       "NOERROR",
+		Blocked:     false,
+		RTT:         fmt.Sprintf("%.2fms", rtt),
+		QName:       qname,
+		QType:       qtype,
+		MsgId:       msgId,
+		ClientIP:    clientIP.String(),
+		GeoCountry:  clientCountryName,
+		UpstreamDNS: this.upstreamDNS[0].String(),
+	}
+	// TODO 插入DNS日志到数据库，暂时先空着
+	this.Logger.Info("返回DNS响应", zap.String("clientIP", clientIP.String()), zap.String("clientCountry", clientCountryName))
+	this.Logger.Info("DNS日志", zap.Any("dnslog", dnslog))
+	return this.writePacket(packet, clientAddr, resp)
+}
 
-	return nil
+func (this *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float64, error) {
+	conn, err := net.DialUDP("udp", nil, &this.upstreamDNS[0])
+	if err != nil {
+		return nil, 0, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	start := time.Now()
+	if _, err := conn.Write(reqBytes); err != nil {
+		return nil, 0, err
+	}
+	buffer := make([]byte, 4096)
+	n, _, err := conn.ReadFrom(buffer)
+	if err != nil {
+		return nil, 0, fmt.Errorf("读取响应失败: %w", err)
+	}
+	rtt := time.Since(start).Seconds() * 1000
+	resp := make([]byte, n)
+	copy(resp, buffer[:n])
+	return resp, rtt, nil
 
 }
 
-func (this *Server) buildNXDomainDNSLog() DnsLog {
+func (this *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsLog {
 	return DnsLog{
 		Time:     time.Now().Format("YYYY-MM-DD HH:mm:ss"),
 		Protocol: "udp",
 		RCode:    "NXDOMAIN",
 		Blocked:  true,
 		RTT:      "0.00ms",
+		QName:    qname,
+		QType:    qtype,
+		MsgId:    msgId,
 	}
 }
 
