@@ -115,7 +115,10 @@ func (this *Server) serveAtUDP(ctx context.Context) error {
 }
 
 func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
-	msgId := ctx.Value("msgId").(int)
+	msgId := -1
+	if v := ctx.Value("msgId"); v != nil {
+		msgId = v.(int)
+	}
 	blocker := this.blockerManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
@@ -148,7 +151,7 @@ func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, 
 		this.Logger.Error("打包NXDOMAIN失败", zap.Error(err))
 		return fmt.Errorf("打包NXDOMAIN失败: %w", err)
 	}
-	if qname != "" && !blocker.isIPAllowed(clientIP) || !blocker.isCountryAllowed(clientCountry) || (blocker.isBlockedDomain(qname) && !blocker.isWhiteDomain(qname)) {
+	if (qname != "" && !blocker.isIPAllowed(clientIP)) || !blocker.isCountryAllowed(clientCountry) || (blocker.isBlockedDomain(qname) && !blocker.isWhiteDomain(qname)) {
 		dnslog := this.buildNXDomainDNSLog(msgId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
 		dnslog.GeoCountry = clientCountryName
@@ -158,12 +161,12 @@ func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, 
 
 	}
 	resp, rtt, err := this.forwardUDP(ctx, reqBytes)
-	if err != nil {
+	if err != nil || len(resp) == 0 {
 		this.Logger.Error("转发请求失败", zap.Error(err))
-		return fmt.Errorf("转发请求失败: %w", err)
+		return this.writePacket(packet, clientAddr, nxdomain)
 	}
 	dnslog := DnsLog{
-		Time:        time.Now().Format("YYYY-MM-DD HH:mm:ss"),
+		Time:        TimeNow(),
 		Protocol:    "udp",
 		RCode:       "NOERROR",
 		Blocked:     false,
@@ -206,7 +209,7 @@ func (this *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, fl
 
 func (this *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsLog {
 	return DnsLog{
-		Time:     time.Now().Format("YYYY-MM-DD HH:mm:ss"),
+		Time:     TimeNow(),
 		Protocol: "udp",
 		RCode:    "NXDOMAIN",
 		Blocked:  true,

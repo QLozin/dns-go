@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -169,6 +170,59 @@ func ResolveDNSResponse(resp []byte) (rcode string, answers []string, err error)
 		if err != nil {
 			return rcode, nil, fmt.Errorf("解析响应答案失败: %w", err)
 		}
-		answers = append(answers)
+		answers = append(answers, StructToString(answer))
 	}
+	return rcode, answers, nil
+}
+
+func PtrFinding(ptr reflect.Value) reflect.Value {
+	if ptr.Kind() == reflect.Ptr {
+		if ptr.IsNil() {
+			return reflect.Value{}
+		}
+		return PtrFinding(ptr.Elem())
+	}
+	return ptr
+}
+
+func StructToString(v interface{}) string {
+	if v == nil || reflect.ValueOf(v).IsNil() {
+		return "<nil>"
+	}
+	val := reflect.ValueOf(v)
+	val = PtrFinding(val)
+	if !val.IsValid() {
+		return "<nil>"
+	}
+	if val.Kind() != reflect.Struct {
+		return fmt.Sprintf("%v", v)
+	}
+	var result []string
+	typ := val.Type()
+	for i := 0; i < val.NumField(); i++ {
+		field := val.Field(i)
+		fieldName := typ.Field(i).Name
+		if !field.CanInterface() {
+			continue
+		}
+		dereference := PtrFinding(field)
+		var fieldValue string
+		if !dereference.IsValid() {
+			fieldValue = "<nil>"
+		} else {
+			if str, ok := field.Interface().(fmt.Stringer); ok {
+				fieldValue = str.String()
+			} else {
+				fieldValue = fmt.Sprintf("%v", dereference.Interface())
+			}
+		}
+
+		result = append(result, fmt.Sprintf("%s:%s", fieldName, fieldValue))
+	}
+
+	return strings.Join(result, " ")
+}
+
+func TimeNow() string {
+	return time.Now().Format("2025-01-01 00:00:00")
 }
