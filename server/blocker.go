@@ -281,7 +281,7 @@ func (b *Blocker) geoip2Update() error {
 		b.Logger.Warn(fmt.Sprintf("GeoIP2文件写入失败（不影响使用）: %s", err.Error()))
 		return nil // 文件写入失败不影响使用，因为已经加载到内存
 	}
-	err = FileRename(tempPath, geoipPath)
+	err = os.Rename(tempPath, geoipPath)
 	if err != nil {
 		b.Logger.Warn(fmt.Sprintf("文件下载成功但替换旧文件 %s 失败（不影响使用）: %s", geoipPath, err.Error()))
 		return nil // 文件重命名失败不影响使用，因为已经加载到内存

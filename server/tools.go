@@ -70,16 +70,6 @@ func FileRemove(path string) error {
 	}
 	return os.Remove(path)
 }
-func FileRename(oldPath, newPath string) error {
-	if FileExists(oldPath) {
-		deleteErr := FileRemove(oldPath)
-		if deleteErr != nil {
-			return deleteErr
-		}
-		return os.Rename(oldPath, newPath)
-	}
-	return nil
-}
 
 func DnsReqTypeToString(t dnsmessage.Type) string {
 	switch t {
