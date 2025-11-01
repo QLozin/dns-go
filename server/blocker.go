@@ -32,6 +32,8 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 	if writeLockFirst == "" || writeLockFirst == "0" {
 		blocker.Logger.Warn("GO_RWMUTEX_WRITESTARVATION 没有设置或被设置为旧模式（读锁优先），可能产生写锁饥饿")
 	}
+	blocker.GeoReady.Store(false)
+	blocker.DomainListReady.Store(false)
 	return blocker
 }
 
