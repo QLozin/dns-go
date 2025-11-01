@@ -121,20 +121,29 @@ func (s *Server) waitBlockerStart() error {
 
 func (s *Server) serveAtUDP(ctx context.Context) error {
 	// 边界层：网络监听失败是系统级错误，必须记录
-	packet, err := net.ListenPacket("udp", s.ServerConfig.UdpPort)
+	// 使用 net.ListenUDP 以便更好地控制源IP
+	addr, err := net.ResolveUDPAddr("udp", s.ServerConfig.UdpPort)
+	if err != nil {
+		s.Logger.Error("解析UDP地址失败",
+			zap.String("port", s.ServerConfig.UdpPort),
+			zap.Error(err))
+		return fmt.Errorf("解析UDP地址失败: %w", err)
+	}
+
+	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		s.Logger.Error("UDP监听失败",
 			zap.String("port", s.ServerConfig.UdpPort),
 			zap.Error(err))
 		return fmt.Errorf("UDP监听失败: %w", err)
 	}
-	defer packet.Close()
+	defer conn.Close()
 
 	s.Logger.Info("UDP服务已启动", zap.String("port", s.ServerConfig.UdpPort))
 	buffer := make([]byte, 4096)
 	for {
-		packet.SetReadDeadline(time.Now().Add(5 * time.Second))
-		copiedNumber, addr, err := packet.ReadFrom(buffer)
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		copiedNumber, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				if ctx.Err() != nil {
@@ -156,12 +165,286 @@ func (s *Server) serveAtUDP(ctx context.Context) error {
 						zap.Stack("stack"))
 				}
 			}()
-			s.processUDPRequest(ctx, addr, data, packet)
+			s.processUDPRequest(ctx, clientAddr, data, conn)
 		}()
 	}
 }
 
 func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
+	// 如果是 UDPConn，直接使用 WriteToUDP，确保从正确的源IP和端口发送
+	if udpConn, ok := packet.(*net.UDPConn); ok {
+		clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
+		if !ok {
+			s.Logger.Debug("客户端地址类型异常", zap.Any("clientAddr", clientAddr))
+			return nil
+		}
+		return s.processUDPRequestWithConn(ctx, clientUDPAddr, reqBytes, udpConn)
+	}
+	// 回退到原始方法
+	return s.processUDPRequestOriginal(ctx, clientAddr, reqBytes, packet)
+}
+
+// processUDPRequestWithConn 使用 UDPConn 处理请求，确保从正确的源IP和端口发送响应
+func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.UDPAddr, reqBytes []byte, conn *net.UDPConn) error {
+	traceId, _ := ctx.Value("traceId").(int)
+	blocker := s.BlockManager
+	clientIP := clientAddr.IP
+	clientCountry, clientCountryName := s.BlockManager.SearchIPCountry(clientIP)
+
+	// 解析DNS请求
+	var parser dnsmessage.Parser
+	header, err := parser.Start(reqBytes)
+	if err != nil {
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+		}
+		return nil
+	}
+	ques, err := parser.Question()
+	if err != nil {
+		s.logQuestionParseError(err, clientIP, traceId, header, reqBytes)
+		return nil
+	}
+	qtype := DnsReqTypeToString(ques.Type)
+	qname := ques.Name.String()
+	qname = strings.ToLower(qname)
+	qname = strings.TrimSuffix(qname, ".")
+
+	// 准备NXDOMAIN响应
+	msg := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
+		Questions: []dnsmessage.Question{ques},
+	}
+	nxdomain, err := msg.Pack()
+	if err != nil {
+		s.Logger.Error("打包NXDOMAIN消息失败",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.Int("traceId", traceId))
+		return nil
+	}
+
+	// 辅助函数：发送阻断响应
+	sendBlockResponse := func(reason string) error {
+		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
+		dnslog.ClientIP = clientIP.String()
+		dnslog.GeoCountry = clientCountryName
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+		if s.hasDevMode("trace") && !s.hasLogOption("press") {
+			s.Logger.Info(reason,
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("country", clientCountry))
+		}
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("clientCountry", clientCountryName),
+				zap.String("qname", qname),
+				zap.String("reason", reason),
+				zap.Int("traceId", traceId))
+		}
+		// 使用 WriteToUDP 从正确的源IP和端口发送
+		deadline := time.Now().Add(5 * time.Second)
+		conn.SetWriteDeadline(deadline)
+		_, err := conn.WriteToUDP(nxdomain, clientAddr)
+		if err != nil {
+			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
+	}
+
+	// IP白名单检查
+	if blocker.isIPAllowed(clientIP) {
+		if s.hasDevMode("trace") {
+			s.Logger.Info("IP在白名单中，允许转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
+		}
+		s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
+	} else {
+		// IP黑名单和国家封锁检查
+		if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
+			reason := "IP被阻断或国家不合法，阻止转发"
+			if s.hasDevMode("trace") && !s.hasLogOption("press") {
+				isBlocked := blocker.isIPBlocked(clientIP)
+				countryAllowed := blocker.isCountryAllowed(clientCountry)
+				s.Logger.Info(reason,
+					zap.String("clientIP", clientIP.String()),
+					zap.Bool("isIPBlocked", isBlocked),
+					zap.Bool("isCountryAllowed", countryAllowed),
+					zap.String("country", clientCountry),
+					zap.String("qname", qname))
+			}
+			return sendBlockResponse(reason)
+		}
+
+		// 域名检查
+		if blocker.isWhiteDomain(qname) {
+			if s.hasDevMode("trace") {
+				s.Logger.Info("域名在白名单中，允许转发",
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname),
+					zap.String("country", clientCountry))
+			}
+			s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
+		} else if blocker.isBlockedDomain(qname) {
+			if s.hasDevMode("trace") && !s.hasLogOption("press") {
+				s.Logger.Info("域名被阻断，阻止转发",
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname))
+			}
+			return sendBlockResponse("域名被阻断，阻止转发")
+		} else {
+			if s.hasDevMode("trace") {
+				s.Logger.Info("普通IP且域名未被阻断，允许转发",
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname),
+					zap.String("country", clientCountry))
+			}
+			s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
+		}
+	}
+
+	// hook模式
+	if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, conn, clientIP, traceId, qname, qtype); handled {
+		return err
+	}
+
+	// 转发请求
+	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
+	if err != nil || len(resp) == 0 {
+		errorMsg := ""
+		if err != nil {
+			errorMsg = err.Error()
+		} else {
+			errorMsg = "响应为空"
+		}
+		dnslog := DnsLog{
+			Time:        TimeNow(),
+			Protocol:    "udp",
+			RCode:       "SERVFAIL",
+			Blocked:     false,
+			RTT:         "0.00ms",
+			QName:       qname,
+			QType:       qtype,
+			MsgId:       traceId,
+			ClientIP:    clientIP.String(),
+			GeoCountry:  clientCountryName,
+			UpstreamDNS: s.upstreamDNS[0].String(),
+			Error:       errorMsg,
+		}
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+		s.Logger.Warn("DNS转发失败",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.String("upstreamDNS", s.upstreamDNS[0].String()),
+			zap.Error(err),
+			zap.Int("traceId", traceId))
+		deadline := time.Now().Add(5 * time.Second)
+		conn.SetWriteDeadline(deadline)
+		_, err := conn.WriteToUDP(nxdomain, clientAddr)
+		if err != nil {
+			s.Logger.Error("发送SERVFAIL响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
+	}
+
+	dnslog := DnsLog{
+		Time:        TimeNow(),
+		Protocol:    "udp",
+		RCode:       "NOERROR",
+		Blocked:     false,
+		RTT:         fmt.Sprintf("%.2fms", rtt),
+		QName:       qname,
+		QType:       qtype,
+		MsgId:       traceId,
+		ClientIP:    clientIP.String(),
+		GeoCountry:  clientCountryName,
+		UpstreamDNS: s.upstreamDNS[0].String(),
+	}
+	if err := s.DB.InsertDnsLog(dnslog); err != nil {
+	}
+	if len(resp) < 12 {
+		s.Logger.Error("上游DNS响应数据过短，无法解析",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		deadline := time.Now().Add(5 * time.Second)
+		conn.SetWriteDeadline(deadline)
+		_, err := conn.WriteToUDP(nxdomain, clientAddr)
+		if err != nil {
+			s.Logger.Error("发送SERVFAIL响应失败", zap.Error(err))
+		}
+		return nil
+	}
+
+	// 解析响应头用于trace模式
+	var respHeader dnsmessage.Header
+	if s.hasDevMode("trace") {
+		var respParser dnsmessage.Parser
+		h, err := respParser.Start(resp)
+		if err == nil {
+			respHeader = h
+		}
+	}
+
+	// trace模式：输出响应详情
+	s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+
+	s.Logger.Debug("DNS请求成功响应",
+		zap.String("clientIP", clientIP.String()),
+		zap.String("qname", qname),
+		zap.String("qtype", qtype),
+		zap.String("rtt", dnslog.RTT),
+		zap.Int("traceId", traceId),
+		zap.Int("responseSize", len(resp)))
+
+	// trace模式：输出准备发送详情
+	s.traceDNSSend(resp, clientAddr, traceId)
+
+	// 使用 WriteToUDP 发送响应，确保从正确的源IP和端口发送
+	deadline := time.Now().Add(5 * time.Second)
+	conn.SetWriteDeadline(deadline)
+	_, err = conn.WriteToUDP(resp, clientAddr)
+	if err != nil {
+		s.traceDNSSendResult(resp, clientAddr, traceId, err)
+		s.Logger.Error("发送DNS响应到客户端失败",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.String("qtype", qtype),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		return err
+	}
+
+	// trace模式：输出发送成功详情
+	s.traceDNSSendResult(resp, clientAddr, traceId, nil)
+	s.Logger.Debug("DNS响应已成功发送到客户端",
+		zap.String("clientIP", clientIP.String()),
+		zap.String("qname", qname),
+		zap.Int("traceId", traceId))
+	return nil
+}
+
+func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
 	traceId, _ := ctx.Value("traceId").(int)
 	blocker := s.BlockManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
