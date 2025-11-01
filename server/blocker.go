@@ -15,6 +15,43 @@ import (
 	"go.uber.org/zap"
 )
 
+type IPSet struct {
+	Network  []net.IPNet
+	SingleIP []net.IP
+}
+
+func (i *IPSet) Add(anyip string) error {
+	if strings.Contains(anyip, "/") {
+		_, net, err := net.ParseCIDR(anyip)
+		if err != nil {
+			return err
+		}
+		i.Network = append(i.Network, *net)
+	} else {
+		ipAddr := net.ParseIP(anyip)
+		if ipAddr == nil {
+			return fmt.Errorf("无效的IP地址: %s", anyip)
+		}
+		i.SingleIP = append(i.SingleIP, ipAddr)
+	}
+	return nil
+}
+
+func (i *IPSet) Contains(ip string) bool {
+	ipAddr := net.ParseIP(ip)
+	for _, net := range i.Network {
+		if net.Contains(ipAddr) {
+			return true
+		}
+	}
+	for _, singleIP := range i.SingleIP {
+		if singleIP.Equal(ipAddr) {
+			return true
+		}
+	}
+	return false
+}
+
 func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker {
 
 	option := &BlockOptions{}
@@ -27,7 +64,8 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 		stopCh:         make(chan struct{}),
 		domainSet:      make(Set, 10240),
 		whiteDomainSet: make(Set, 10240),
-		whiteIPSet:     make([]net.IPNet, 0, 10240),
+		whiteIPSet:     &IPSet{},
+		localIPSet:     &IPSet{},
 	}
 	writeLockFirst := os.Getenv("GO_RWMUTEX_WRITESTARVATION")
 	if writeLockFirst == "" || writeLockFirst == "0" {
@@ -36,8 +74,10 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 	blocker.GeoReady.Store(false)
 	blocker.DomainListReady.Store(false)
 	for _, i := range []string{"100.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"} {
-		_, network, _ := net.ParseCIDR(i)
-		blocker.whiteIPSet = append(blocker.whiteIPSet, *network)
+		blocker.localIPSet.Add(i)
+	}
+	for _, i := range blocker.BlockConfig.WhiteIPs {
+		blocker.whiteIPSet.Add(i)
 	}
 	return blocker
 }
@@ -414,18 +454,12 @@ func (b *Blocker) isCountryAllowed(countryCode string) bool {
 }
 
 func (b *Blocker) isIPAllowed(ip net.IP) bool {
-	if b.isLocalIP(ip) {
+	if b.localIPSet.Contains(ip.String()) || b.whiteIPSet.Contains(ip.String()) {
 		return true
 	}
-
 	return false
 }
 
 func (b *Blocker) isLocalIP(ip net.IP) bool {
-	for _, ipnet := range b.whiteIPSet {
-		if ipnet.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return b.localIPSet.Contains(ip.String())
 }

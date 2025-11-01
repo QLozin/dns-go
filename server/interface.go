@@ -51,6 +51,8 @@ type ServerConfig struct {
 type BlockConfig struct {
 	BlockDomains       []string `toml:"block_domains"`
 	WhiteDomains       []string `toml:"white_domains"`
+	WhiteIPs           []string `toml:"white_ips"`
+	BlockIPs           []string `toml:"block_ips"`
 	BlockSubscribeURLs []string `toml:"block_subscribe_urls"`
 	GeoIP2URL          string   `toml:"geoip2_url"`
 	RefreshHours       int      `toml:"refresh_hours"`
@@ -99,7 +101,8 @@ type Blocker struct {
 	mutexes         BlockerMutex
 	domainSet       Set
 	whiteDomainSet  Set
-	whiteIPSet      []net.IPNet
+	whiteIPSet      *IPSet
+	localIPSet      *IPSet
 	stopCh          chan struct{}
 	ctx             context.Context
 	geoDB           atomic.Pointer[geoip2.Reader]

@@ -16,6 +16,10 @@ write_timeout = "5s"
 block_domains = []
 # 白名单域名列表
 white_domains = []
+# 白名单IP/IP段
+white_ips = ["127.0.0.0/8"]
+# 黑名单IP/IP段
+block_ips = []
 # 域名订阅URL列表（用于自动更新黑名单）
 block_subscribe_urls = []
 # GeoIP2数据库下载URL
