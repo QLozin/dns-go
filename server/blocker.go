@@ -255,6 +255,43 @@ func (b *Blocker) geoip2Update() error {
 	geoipPath := filepath.Join(dir, "Country.mmdb")
 	var tempPath = geoipPath + ".download"
 
+	if FileExists(geoipPath) {
+		fileInfo, err := os.Stat(geoipPath)
+		if err == nil {
+			modTime := fileInfo.ModTime()
+			now := time.Now()
+			if now.Sub(modTime) < 15*time.Minute {
+				b.Logger.Info("GeoIP2文件存在且未超过15分钟，从本地文件加载",
+					zap.String("path", geoipPath),
+					zap.Time("mod_time", modTime),
+					zap.Duration("age", now.Sub(modTime)))
+
+				data, err := os.ReadFile(geoipPath)
+				if err != nil {
+					b.Logger.Warn(fmt.Sprintf("读取本地GeoIP2文件失败，将尝试下载: %s", err.Error()))
+				} else {
+					geoDB, err := geoip2.FromBytes(data)
+					if err != nil {
+						b.Logger.Warn(fmt.Sprintf("本地GeoIP2文件格式错误，将尝试下载: %s", err.Error()))
+					} else {
+						b.geoDB.Swap(geoDB)
+						b.Logger.Info("GeoIP2文件从本地加载成功", zap.String("path", geoipPath))
+						return nil
+					}
+				}
+			} else {
+				b.Logger.Info("GeoIP2文件存在但已超过15分钟，将重新下载",
+					zap.String("path", geoipPath),
+					zap.Time("mod_time", modTime),
+					zap.Duration("age", now.Sub(modTime)))
+			}
+		} else {
+			b.Logger.Warn(fmt.Sprintf("获取GeoIP2文件信息失败，将尝试下载: %s", err.Error()))
+		}
+	} else {
+		b.Logger.Info("GeoIP2文件不存在，将下载", zap.String("path", geoipPath))
+	}
+
 	resp, err := NewHttpClient(false).Get(url)
 	if err != nil {
 		b.Logger.Error(fmt.Sprintf("获取 GeoIP2URL %s 失败", url), zap.Error(err))
