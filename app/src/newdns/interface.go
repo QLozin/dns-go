@@ -2,7 +2,6 @@ package newdns
 
 import (
 	"context"
-	"database/sql"
 	"net"
 	"regexp"
 	"sync"
@@ -17,7 +16,7 @@ import (
 type Set map[string]*regexp.Regexp
 
 type DnsLog struct {
-	Time        string `json:"time"`
+	Time        string `json:"time"` // RFC3339Nano 格式，用于存储
 	ClientIP    string `json:"client_ip"`
 	UpstreamDNS string `json:"upstream_dns"`
 	Protocol    string `json:"protocol"`
@@ -68,11 +67,16 @@ type DBConfig struct {
 	Dir            string `toml:"dir"`
 }
 
+type DBOptions struct {
+	DBConfig DBConfig
+	Logger   *zap.Logger
+}
+
 type ServerOptions struct {
 	ServerConfig ServerConfig
 	BlockManager *Blocker
 	Logger       *zap.Logger
-	DB           *sql.DB
+	DB           *DB // 使用新的 DB 类型替代 *sql.DB
 }
 
 type BlockOptions struct {
@@ -129,7 +133,7 @@ func WithBlockManager(blockManager *Blocker) func(opts_ *ServerOptions) {
 		opts_.BlockManager = blockManager
 	}
 }
-func WithDB(db *sql.DB) func(opts_ *ServerOptions) {
+func WithDB(db *DB) func(opts_ *ServerOptions) {
 	return func(opts_ *ServerOptions) {
 		opts_.DB = db
 	}
@@ -138,5 +142,11 @@ func WithDB(db *sql.DB) func(opts_ *ServerOptions) {
 func WithBlockConfig(cfg BlockConfig) func(opts_ *BlockOptions) {
 	return func(opts_ *BlockOptions) {
 		opts_.BlockConfig = &cfg
+	}
+}
+
+func WithDBConfig(logger *zap.Logger) func(opts_ *DBOptions) {
+	return func(opts_ *DBOptions) {
+		opts_.Logger = logger
 	}
 }

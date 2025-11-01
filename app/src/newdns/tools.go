@@ -223,6 +223,17 @@ func StructToString(v interface{}) string {
 	return strings.Join(result, " ")
 }
 
+// FormatTime 将 RFC3339Nano 格式的时间转换为人类可读格式
+func (d DnsLog) FormatTime() string {
+	if d.Time == "" {
+		return ""
+	}
+	if t, err := time.Parse(time.RFC3339Nano, d.Time); err == nil {
+		return t.Format("2006-01-02 15:04:05.999999999")
+	}
+	return d.Time
+}
+
 func TimeNow() string {
-	return time.Now().Format("2025-01-01 00:00:00")
+	return time.Now().Format(time.RFC3339Nano)
 }
