@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -222,4 +223,21 @@ func (d DnsLog) FormatTime() string {
 
 func TimeNow() string {
 	return time.Now().Format(time.RFC3339Nano)
+}
+
+// BytesToHex 将字节数组转换为十六进制字符串
+// 如果字节数组太长（超过maxBytes），只显示前maxBytes字节
+func BytesToHex(data []byte, maxBytes int) string {
+	if len(data) == 0 {
+		return "(空)"
+	}
+	displayLen := len(data)
+	if maxBytes > 0 && displayLen > maxBytes {
+		displayLen = maxBytes
+	}
+	hexStr := hex.EncodeToString(data[:displayLen])
+	if len(data) > maxBytes {
+		return fmt.Sprintf("%s...(总共%d字节)", hexStr, len(data))
+	}
+	return hexStr
 }

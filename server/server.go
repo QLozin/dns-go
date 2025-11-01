@@ -179,16 +179,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	}
 	ques, err := parser.Question()
 	if err != nil {
-		if err == dnsmessage.ErrSectionDone {
-			s.Logger.Debug("客户端请求格式错误（请求缺少Question部分）",
-				zap.String("clientIP", clientIP.String()),
-				zap.Int("traceId", traceId))
-		} else {
-			s.Logger.Debug("客户端请求格式错误（解析请求问题失败）",
-				zap.Error(err),
-				zap.String("clientIP", clientIP.String()),
-				zap.Int("traceId", traceId))
-		}
+		s.logQuestionParseError(err, clientIP, traceId, header, reqBytes)
 		return nil
 	}
 	qtype := DnsReqTypeToString(ques.Type)
@@ -314,6 +305,35 @@ func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float
 	resp := make([]byte, n)
 	copy(resp, buffer[:n])
 	return resp, rtt, nil
+}
+
+func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, header dnsmessage.Header, reqBytes []byte) {
+	headerInfo := map[string]interface{}{
+		"id":     header.ID,
+		"opcode": header.OpCode,
+		"rcode":  header.RCode,
+	}
+
+	var msg string
+	if err == dnsmessage.ErrSectionDone {
+		msg = "客户端请求格式错误（请求缺少Question部分）"
+	} else {
+		msg = "客户端请求格式错误（解析请求问题失败）"
+	}
+
+	fields := []zap.Field{
+		zap.String("clientIP", clientIP.String()),
+		zap.Int("traceId", traceId),
+		zap.Int("requestSize", len(reqBytes)),
+		zap.String("requestHex", BytesToHex(reqBytes, 512)),
+		zap.Any("dnsHeader", headerInfo),
+	}
+
+	if err != dnsmessage.ErrSectionDone {
+		fields = append(fields, zap.Error(err))
+	}
+
+	s.Logger.Debug(msg, fields...)
 }
 
 func (s *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsLog {
