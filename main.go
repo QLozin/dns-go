@@ -88,6 +88,11 @@ func NewLoggerWithFile(logDir string, level string) (*zap.Logger, error) {
 func main() {
 	flag.Parse()
 
+	// 设置 GO_RWMUTEX_WRITESTARVATION 环境变量为 1，启用写锁优先模式，避免写锁饥饿
+	if os.Getenv("GO_RWMUTEX_WRITESTARVATION") == "" {
+		os.Setenv("GO_RWMUTEX_WRITESTARVATION", "1")
+	}
+
 	// 读取配置文件
 	cfg, err := server.LoadConfig(*configPath)
 	if err != nil {

@@ -183,15 +183,20 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil // 不返回错误，避免在调用层记录
 	}
 	ques, err := parser.Question()
-	qtype := DnsReqTypeToString(ques.Type)
 	if err != nil {
-		// 业务层：客户端请求格式错误，用 Debug
-		s.Logger.Debug("客户端请求格式错误（解析请求问题失败）",
-			zap.Error(err),
-			zap.String("clientIP", clientIP.String()),
-			zap.Int("traceId", traceId))
+		if err == dnsmessage.ErrSectionDone {
+			s.Logger.Debug("客户端请求格式错误（请求缺少Question部分）",
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+		} else {
+			s.Logger.Debug("客户端请求格式错误（解析请求问题失败）",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+		}
 		return nil // 不返回错误，避免在调用层记录
 	}
+	qtype := DnsReqTypeToString(ques.Type)
 	qname := ques.Name.String()
 	qname = strings.ToLower(qname)
 	qname = strings.TrimSuffix(qname, ".")
