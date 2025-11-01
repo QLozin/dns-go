@@ -64,6 +64,10 @@ func (b *Blocker) Start() error {
 	if geoUpdateErr != nil {
 		return geoUpdateErr
 	}
+	// 验证GeoIP2确实已加载到内存
+	if b.geoDB.Load() == nil {
+		return fmt.Errorf("GeoIP2文件更新完成但未加载到内存")
+	}
 	b.initWhiteAndBlockDomains()
 	go b.scheduleUpdate()
 	go b.sheduleUpdateGeo()
@@ -257,14 +261,13 @@ func (b *Blocker) geoip2Update() error {
 		b.Logger.Error(fmt.Sprintf("GeoIP2URL %s 响应体解析失败,Code: %d", url, respCode), zap.Int("status_code", respCode))
 		return fmt.Errorf("GeoIP2URL %s 响应体解析失败,Code: %d", url, respCode)
 	}
-	data, _ := io.ReadAll(resp.Body)
-	if err := b.geoip2DumpToFile(geoipPath, data); err == nil {
-		err := FileRename(tempPath, geoipPath)
-		if err != nil {
-			b.Logger.Error(fmt.Sprintf("文件下载成功，替换旧文件 %s 失败", geoipPath), zap.Error(err))
-		}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		b.Logger.Error(fmt.Sprintf("读取GeoIP2URL %s 响应体失败", url), zap.Error(err))
 		return err
 	}
+
+	// 首先将GeoIP2数据加载到内存（无论文件写入是否成功，都需要加载到内存）
 	geoDB, err := geoip2.FromBytes(data)
 	if err != nil {
 		b.Logger.Error(fmt.Sprintf("GeoIP2文件加载为GeoDB对象失败 %s ", url), zap.Error(err))
@@ -272,6 +275,17 @@ func (b *Blocker) geoip2Update() error {
 	}
 	b.geoDB.Swap(geoDB)
 	b.Logger.Info("GeoIP2文件下载完成并加载成功", zap.String("url", url))
+
+	// 然后尝试保存到文件（失败也不影响使用，因为已经加载到内存）
+	if err := b.geoip2DumpToFile(tempPath, data); err != nil {
+		b.Logger.Warn(fmt.Sprintf("GeoIP2文件写入失败（不影响使用）: %s", err.Error()))
+		return nil // 文件写入失败不影响使用，因为已经加载到内存
+	}
+	err = FileRename(tempPath, geoipPath)
+	if err != nil {
+		b.Logger.Warn(fmt.Sprintf("文件下载成功但替换旧文件 %s 失败（不影响使用）: %s", geoipPath, err.Error()))
+		return nil // 文件重命名失败不影响使用，因为已经加载到内存
+	}
 	return nil
 }
 
@@ -347,10 +361,7 @@ func (b *Blocker) isBlockedDomain(domain string) bool {
 
 func (b *Blocker) isCountryAllowed(countryCode string) bool {
 	countryCode = strings.ToLower(countryCode)
-	if countryCode == "cn" {
-		return true
-	}
-	return false
+	return countryCode == "cn"
 }
 
 func (b *Blocker) isIPAllowed(ip net.IP) bool {
