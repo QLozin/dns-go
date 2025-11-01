@@ -51,14 +51,10 @@ func NormailizeDomain(s string) (string, *regexp.Regexp, error) {
 }
 
 func NewHttpClient(verifySSL bool) *http.Client {
-	var useSSL = false
-	if verifySSL == true {
-		useSSL = true
-	}
 	return &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: useSSL}},
+				InsecureSkipVerify: verifySSL}},
 		Timeout: 30 * time.Second,
 	}
 

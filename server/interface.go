@@ -89,10 +89,9 @@ type BlockOptions struct {
 // 服务配置
 type Server struct {
 	*ServerOptions
-	stopCh         chan struct{}
-	ctx            context.Context
-	blockerManager *Blocker
-	upstreamDNS    []net.UDPAddr
+	stopCh      chan struct{}
+	ctx         context.Context
+	upstreamDNS []net.UDPAddr
 }
 
 type Blocker struct {

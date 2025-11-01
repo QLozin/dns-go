@@ -40,9 +40,9 @@ func NewDB(config *DBOptions) (*DB, error) {
 }
 
 // Open 打开 SQLite 数据库连接并执行迁移
-func (this *DB) Open() error {
-	maxConns := int(this.DBConfig.MaxConnections)
-	sqlitePath := this.DBConfig.SqlitePath
+func (d *DB) Open() error {
+	maxConns := int(d.DBConfig.MaxConnections)
+	sqlitePath := d.DBConfig.SqlitePath
 
 	db, err := sql.Open("sqlite", sqlitePath)
 	if err != nil {
@@ -53,20 +53,20 @@ func (this *DB) Open() error {
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
 		db.Close()
 		// 基础设施层：数据库配置失败是系统错误，记录 Error
-		if this.Logger != nil {
-			this.Logger.Error("设置数据库WAL模式失败",
+		if d.Logger != nil {
+			d.Logger.Error("设置数据库WAL模式失败",
 				zap.String("sqlitePath", sqlitePath),
 				zap.Error(err))
 		}
 		return fmt.Errorf("设置 WAL 模式失败: %w", err)
 	}
-	this.db = db
-	if err := this.migrate(); err != nil {
+	d.db = db
+	if err := d.migrate(); err != nil {
 		db.Close()
-		this.db = nil
+		d.db = nil
 		// 基础设施层：数据库迁移失败是系统错误，记录 Error
-		if this.Logger != nil {
-			this.Logger.Error("数据库迁移失败",
+		if d.Logger != nil {
+			d.Logger.Error("数据库迁移失败",
 				zap.String("sqlitePath", sqlitePath),
 				zap.Error(err))
 		}
@@ -76,15 +76,15 @@ func (this *DB) Open() error {
 	return nil
 }
 
-func (this *DB) Close() error {
-	if this.db != nil {
-		return this.db.Close()
+func (d *DB) Close() error {
+	if d.db != nil {
+		return d.db.Close()
 	}
 	return nil
 }
 
-func (this *DB) migrate() error {
-	db := this.db
+func (d *DB) migrate() error {
+	db := d.db
 	if err := createDnsLogTable(db); err != nil {
 		return fmt.Errorf("创建表结构失败: %w", err)
 	}
@@ -119,8 +119,8 @@ CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs(qname);
 	return nil
 }
 
-func (this *DB) InsertDnsLog(log DnsLog) error {
-	db := this.db
+func (d *DB) InsertDnsLog(log DnsLog) error {
+	db := d.db
 	if db == nil {
 		return fmt.Errorf("数据库连接未初始化")
 	}
@@ -155,8 +155,8 @@ func (this *DB) InsertDnsLog(log DnsLog) error {
 	)
 
 	if err != nil {
-		if this.Logger != nil {
-			this.Logger.Error("插入DNS日志失败", zap.Error(err), zap.Any("dnslog", log))
+		if d.Logger != nil {
+			d.Logger.Error("插入DNS日志失败", zap.Error(err), zap.Any("dnslog", log))
 		}
 		return fmt.Errorf("插入DNS日志失败: %w", err)
 	}

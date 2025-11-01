@@ -17,7 +17,7 @@ import (
 )
 
 var (
-	configPath = flag.String("config", "server/default.toml", "配置文件路径")
+	configPath = flag.String("config", "default.toml", "配置文件路径")
 	version    = "1.0.0"
 )
 
