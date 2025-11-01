@@ -530,10 +530,213 @@ func (s *Server) hasLogOption(option string) bool {
 	return false
 }
 
+// getSourceIPForClient 根据客户端IP查找应该使用的源IP
+// 这个方法通过查找与客户端IP在同一子网或可以通过默认路由到达的接口IP
+func (s *Server) getSourceIPForClient(clientIP net.IP) (net.IP, error) {
+	// 获取所有网络接口
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, fmt.Errorf("获取网络接口失败: %w", err)
+	}
+
+	var candidateIPs []net.IP
+	var sameSubnetIP net.IP
+
+	// 首先尝试找到与客户端在同一子网的接口
+	for _, iface := range interfaces {
+		// 跳过环回接口和未启动的接口
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok {
+				continue
+			}
+
+			ip := ipNet.IP
+			// 只考虑IPv4地址
+			if ip = ip.To4(); ip == nil {
+				continue
+			}
+
+			// 检查客户端IP是否在同一子网
+			if ipNet.Contains(clientIP) {
+				sameSubnetIP = ip
+				break
+			}
+
+			// 收集候选IP
+			// 如果客户端是公网IP，优先选择公网IP；如果客户端是私有IP，也考虑私有IP
+			if clientIP.IsPrivate() || !ip.IsPrivate() {
+				candidateIPs = append(candidateIPs, ip)
+			}
+		}
+
+		// 如果找到同子网的IP，直接返回
+		if sameSubnetIP != nil {
+			return sameSubnetIP, nil
+		}
+	}
+
+	// 如果找不到同子网的接口，从候选中选择
+	// 如果客户端是公网IP，优先选择第一个公网IP
+	if !clientIP.IsPrivate() {
+		for _, ip := range candidateIPs {
+			if !ip.IsPrivate() {
+				return ip, nil
+			}
+		}
+	}
+
+	// 如果客户端是私有IP或没有公网IP候选，使用第一个候选
+	if len(candidateIPs) > 0 {
+		return candidateIPs[0], nil
+	}
+
+	// 最后尝试：返回第一个非回环的IPv4地址
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			default:
+				continue
+			}
+
+			if ip = ip.To4(); ip != nil {
+				return ip, nil
+			}
+		}
+	}
+
+	// 如果还是找不到，返回错误
+	return nil, fmt.Errorf("无法找到可以路由到客户端 %s 的本地IP", clientIP.String())
+}
+
 func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) error {
 	if len(data) == 0 {
 		return fmt.Errorf("尝试发送空响应数据")
 	}
+
+	// 获取客户端UDP地址
+	clientUDPAddr, ok := addr.(*net.UDPAddr)
+	if !ok {
+		return fmt.Errorf("无效的客户端地址类型")
+	}
+
+	// 获取packet的本地地址
+	localAddr := packet.LocalAddr()
+	localUDPAddr, ok := localAddr.(*net.UDPAddr)
+	if !ok {
+		// 如果无法获取本地地址，使用原始方法
+		return s.writePacketFallback(packet, addr, data)
+	}
+
+	// 如果监听的是特定IP（不是0.0.0.0），直接使用它
+	if !localUDPAddr.IP.IsUnspecified() {
+		// 使用专门的连接，确保从正确的源IP发送
+		conn, err := net.DialUDP("udp", localUDPAddr, clientUDPAddr)
+		if err != nil {
+			// 如果失败，尝试查找正确的源IP
+			sourceIP, sourceErr := s.getSourceIPForClient(clientUDPAddr.IP)
+			if sourceErr == nil {
+				sourceAddr := &net.UDPAddr{
+					IP:   sourceIP,
+					Port: localUDPAddr.Port,
+				}
+				conn, err = net.DialUDP("udp", sourceAddr, clientUDPAddr)
+			}
+			if err != nil {
+				// 如果仍然失败，回退到原始方法
+				return s.writePacketFallback(packet, addr, data)
+			}
+			defer conn.Close()
+		} else {
+			defer conn.Close()
+		}
+
+		deadline := time.Now().Add(5 * time.Second)
+		if err := conn.SetWriteDeadline(deadline); err != nil {
+			return fmt.Errorf("设置写入截止时间失败: %w", err)
+		}
+		n, err := conn.Write(data)
+		if err != nil {
+			return fmt.Errorf("写入UDP数据包失败: %w", err)
+		}
+		if n != len(data) {
+			return fmt.Errorf("部分写入: 期望%d字节，实际写入%d字节", len(data), n)
+		}
+		return nil
+	}
+
+	// 如果监听的是 0.0.0.0，需要找到正确的源IP
+	sourceIP, err := s.getSourceIPForClient(clientUDPAddr.IP)
+	if err != nil {
+		// 如果找不到，回退到原始方法
+		s.Logger.Debug("无法确定源IP，使用默认方法发送响应",
+			zap.String("clientIP", clientUDPAddr.IP.String()),
+			zap.Error(err))
+		return s.writePacketFallback(packet, addr, data)
+	}
+
+	// 使用找到的源IP创建连接
+	sourceAddr := &net.UDPAddr{
+		IP:   sourceIP,
+		Port: localUDPAddr.Port,
+	}
+	conn, err := net.DialUDP("udp", sourceAddr, clientUDPAddr)
+	if err != nil {
+		// 如果失败，回退到原始方法
+		s.Logger.Debug("使用指定源IP创建连接失败，使用默认方法",
+			zap.String("sourceIP", sourceIP.String()),
+			zap.String("clientIP", clientUDPAddr.IP.String()),
+			zap.Error(err))
+		return s.writePacketFallback(packet, addr, data)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("设置写入截止时间失败: %w", err)
+	}
+	n, err := conn.Write(data)
+	if err != nil {
+		return fmt.Errorf("写入UDP数据包失败: %w", err)
+	}
+	if n != len(data) {
+		return fmt.Errorf("部分写入: 期望%d字节，实际写入%d字节", len(data), n)
+	}
+
+	// 记录使用的源IP（用于调试）
+	if s.hasDevMode("trace") {
+		s.Logger.Debug("使用指定源IP发送响应",
+			zap.String("sourceIP", sourceIP.String()),
+			zap.String("clientIP", clientUDPAddr.IP.String()))
+	}
+	return nil
+}
+
+// writePacketFallback 回退方法：使用原始的packet.WriteTo
+func (s *Server) writePacketFallback(packet net.PacketConn, addr net.Addr, data []byte) error {
 	deadline := time.Now().Add(5 * time.Second)
 	if err := packet.SetWriteDeadline(deadline); err != nil {
 		return fmt.Errorf("设置写入截止时间失败: %w", err)
