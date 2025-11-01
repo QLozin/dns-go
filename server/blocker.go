@@ -78,10 +78,16 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 		blocker.localIPSet.Add(i)
 	}
 	for _, i := range blocker.BlockConfig.WhiteIPs {
-		blocker.whiteIPSet.Add(i)
+		if err := blocker.whiteIPSet.Add(i); err != nil {
+			// 初始化阶段可能没有logger，使用fmt输出
+			fmt.Printf("警告: 添加白名单IP失败: %s, 错误: %v\n", i, err)
+		}
 	}
 	for _, i := range blocker.BlockConfig.BlockIPs {
-		blocker.blockIPSet.Add(i)
+		if err := blocker.blockIPSet.Add(i); err != nil {
+			// 初始化阶段可能没有logger，使用fmt输出
+			fmt.Printf("警告: 添加黑名单IP失败: %s, 错误: %v\n", i, err)
+		}
 	}
 	return blocker
 }

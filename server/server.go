@@ -213,12 +213,38 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	shouldForward := true
 	if blocker.isIPAllowed(clientIP) {
 		shouldForward = true
-
+		if s.hasDevMode("trace") {
+			s.Logger.Info("IP在白名单中，允许转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
+		}
 	} else if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
 		shouldForward = false
+		if s.hasDevMode("trace") {
+			isBlocked := blocker.isIPBlocked(clientIP)
+			countryAllowed := blocker.isCountryAllowed(clientCountry)
+			s.Logger.Info("IP被阻断或国家不合法，阻止转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Bool("isIPBlocked", isBlocked),
+				zap.Bool("isCountryAllowed", countryAllowed),
+				zap.String("country", clientCountry))
+		}
 	} else {
 		if blocker.isBlockedDomain(qname) {
 			shouldForward = false
+			if s.hasDevMode("trace") {
+				s.Logger.Info("域名被阻断，阻止转发",
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname))
+			}
+		} else {
+			if s.hasDevMode("trace") {
+				s.Logger.Info("普通IP且域名未被阻断，允许转发",
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname),
+					zap.String("country", clientCountry))
+			}
 		}
 	}
 	if !shouldForward {
