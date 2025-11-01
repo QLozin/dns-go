@@ -409,11 +409,9 @@ func (b *Blocker) SearchIPCountry(ip net.IP) (string, string) {
 		code = rec.Country.IsoCode
 		name = rec.Country.Names["zh-CN"]
 		if code == "" || name == "" {
-			b.Logger.Info(fmt.Sprintf("没有找到IP国家信息，查询的IP：%s, 国家代码：%s, 国家名称：%s", ip.String(), code, name))
 			return "", ""
 		}
 	}
-	b.Logger.Info(fmt.Sprintf("成功查询IP %s 的国家信息, 国家代码：%s, 国家名称：%s", ip.String(), code, name))
 	return code, name
 }
 

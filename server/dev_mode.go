@@ -149,19 +149,66 @@ func (s *Server) printTraceDebug(label string, message string) {
 	s.Logger.Info(fmt.Sprintf("* %s: %s", label, message))
 }
 
-// traceDNSRequest 输出DNS请求的详细信息（参考dig.py样式）
+// traceDNSRequest 输出DNS请求的详细信息（参考curl -vv和dig.py样式）
 func (s *Server) traceDNSRequest(reqBytes []byte, header dnsmessage.Header, question dnsmessage.Question, clientIP net.IP, traceId int) {
 	if !s.hasDevMode("trace") {
 		return
 	}
 
+	now := time.Now()
+	ts := now.Format("2006-01-02 15:04:05.000")
+
+	fmt.Printf("\n")
+	s.printTraceDebug("=== DNS查询请求 ===", "")
+	fmt.Printf("    客户端IP: %s\n", clientIP.String())
+	fmt.Printf("    时间戳: %s\n", ts)
+	fmt.Printf("    跟踪ID: %d\n", traceId)
+
 	s.printTraceDebug("DNS查询消息", fmt.Sprintf("查询 %s %s", question.Name.String(), DnsReqTypeToString(question.Type)))
 	fmt.Printf("    原始数据 (%d 字节): %s\n", len(reqBytes), formatHex(reqBytes, 64))
-	fmt.Printf("    消息头: ID=%d, QR=%d, Opcode=%d, RD=%d, 问题数=%d\n",
-		header.ID, boolToIntDev(header.Response), header.OpCode, boolToIntDev(header.RecursionDesired), len([]dnsmessage.Question{question}))
+
+	// 详细的DNS消息头信息
+	// 问题数（QDCOUNT）：DNS查询中Question部分的数量，通常为1（一次查询一个域名的某类记录）
+	fmt.Printf("    DNS消息头详情:\n")
+	fmt.Printf("      ID (事务ID): %d (0x%04x)\n", header.ID, header.ID)
+	fmt.Printf("      标志位:\n")
+	fmt.Printf("        QR (查询/响应): %d (%s)\n", boolToIntDev(header.Response), map[bool]string{false: "查询", true: "响应"}[header.Response])
+	fmt.Printf("        Opcode (操作码): %d (%s)\n", header.OpCode, getOpcodeString(header.OpCode))
+	fmt.Printf("        AA (权威应答): %d\n", boolToIntDev(header.Authoritative))
+	fmt.Printf("        TC (截断标志): %d\n", boolToIntDev(header.Truncated))
+	fmt.Printf("        RD (递归期望): %d\n", boolToIntDev(header.RecursionDesired))
+	fmt.Printf("        RA (递归可用): %d\n", boolToIntDev(header.RecursionAvailable))
+	fmt.Printf("        RCode (响应码): %d (%s)\n", int(header.RCode), DnsRCodeToString(header.RCode))
+	fmt.Printf("      计数:\n")
+	fmt.Printf("        问题数 (QDCOUNT): %d (DNS查询中Question部分的数量，通常为1，表示一次查询一个域名)\n", len([]dnsmessage.Question{question}))
+	fmt.Printf("        回答数 (ANCOUNT): 0 (响应中的Answer记录数)\n")
+	fmt.Printf("        授权数 (NSCOUNT): 0 (响应中的Authority记录数)\n")
+	fmt.Printf("        额外数 (ARCOUNT): 0 (响应中的Additional记录数)\n")
+	fmt.Printf("    问题详情:\n")
+	fmt.Printf("      域名: %s\n", question.Name.String())
+	fmt.Printf("      类型: %s (%d)\n", DnsReqTypeToString(question.Type), uint16(question.Type))
+	fmt.Printf("      类别: IN (%d)\n", uint16(question.Class))
 }
 
-// traceDNSResponse 输出DNS响应的详细信息（参考dig.py样式）
+// getOpcodeString 获取操作码的字符串表示
+func getOpcodeString(opcode dnsmessage.OpCode) string {
+	switch int(opcode) {
+	case 0:
+		return "标准查询 (QUERY)"
+	case 1:
+		return "反向查询 (IQUERY)"
+	case 2:
+		return "状态查询 (STATUS)"
+	case 3:
+		return "通知 (NOTIFY)"
+	case 4:
+		return "更新 (UPDATE)"
+	default:
+		return fmt.Sprintf("未知(%d)", int(opcode))
+	}
+}
+
+// traceDNSResponse 输出DNS响应的详细信息（参考curl -vv和dig.py样式）
 func (s *Server) traceDNSResponse(respBytes []byte, header dnsmessage.Header, clientIP net.IP, traceId int, rtt float64) {
 	if !s.hasDevMode("trace") {
 		return
@@ -170,23 +217,143 @@ func (s *Server) traceDNSResponse(respBytes []byte, header dnsmessage.Header, cl
 	now := time.Now()
 	ts := now.Format("2006-01-02 15:04:05.000")
 
+	fmt.Printf("\n")
+	s.printTraceDebug("=== DNS响应消息 ===", "")
+	fmt.Printf("    客户端IP: %s\n", clientIP.String())
 	s.printTraceDebug("DNS响应已接收", fmt.Sprintf("%d 字节", len(respBytes)))
 	fmt.Printf("    时间戳: %s\n", ts)
 	if rtt > 0 {
 		fmt.Printf("    往返时间(RTT): %.2f ms\n", rtt)
 	}
 
-	// 从响应数据解析回答数量（DNS头部第5-6字节为ANCount）
+	// 从响应数据解析计数（DNS头部字节4-11）
+	qdcount := uint16(0)
 	ancount := uint16(0)
-	if len(respBytes) >= 6 {
-		ancount = uint16(respBytes[4])<<8 | uint16(respBytes[5])
+	nscount := uint16(0)
+	arcount := uint16(0)
+	if len(respBytes) >= 12 {
+		qdcount = uint16(respBytes[4])<<8 | uint16(respBytes[5])
+		ancount = uint16(respBytes[6])<<8 | uint16(respBytes[7])
+		nscount = uint16(respBytes[8])<<8 | uint16(respBytes[9])
+		arcount = uint16(respBytes[10])<<8 | uint16(respBytes[11])
 	}
 
-	fmt.Printf("    响应消息头: ID=%d, QR=%d, 响应码=%s, 回答数=%d, AA=%d, RA=%d\n",
-		header.ID, boolToIntDev(header.Response), DnsRCodeToString(header.RCode),
-		ancount, boolToIntDev(header.Authoritative), boolToIntDev(header.RecursionAvailable))
+	fmt.Printf("    DNS消息头详情:\n")
+	fmt.Printf("      ID (事务ID): %d (0x%04x)\n", header.ID, header.ID)
+	fmt.Printf("      标志位:\n")
+	fmt.Printf("        QR (查询/响应): %d (%s)\n", boolToIntDev(header.Response), map[bool]string{false: "查询", true: "响应"}[header.Response])
+	fmt.Printf("        Opcode (操作码): %d (%s)\n", header.OpCode, getOpcodeString(header.OpCode))
+	fmt.Printf("        AA (权威应答): %d\n", boolToIntDev(header.Authoritative))
+	fmt.Printf("        TC (截断标志): %d\n", boolToIntDev(header.Truncated))
+	fmt.Printf("        RD (递归期望): %d\n", boolToIntDev(header.RecursionDesired))
+	fmt.Printf("        RA (递归可用): %d\n", boolToIntDev(header.RecursionAvailable))
+	fmt.Printf("        RCode (响应码): %d (%s)\n", int(header.RCode), DnsRCodeToString(header.RCode))
+	fmt.Printf("      计数:\n")
+	fmt.Printf("        问题数 (QDCOUNT): %d\n", qdcount)
+	fmt.Printf("        回答数 (ANCOUNT): %d\n", ancount)
+	fmt.Printf("        授权数 (NSCOUNT): %d\n", nscount)
+	fmt.Printf("        额外数 (ARCOUNT): %d\n", arcount)
+
+	// 解析并显示响应内容
+	var parser dnsmessage.Parser
+	if _, err := parser.Start(respBytes); err == nil {
+		// 跳过Questions部分
+		for {
+			_, err := parser.Question()
+			if err == dnsmessage.ErrSectionDone {
+				break
+			}
+			if err != nil {
+				break
+			}
+		}
+
+		// 解析Answers
+		if ancount > 0 {
+			fmt.Printf("    回答记录 (Answer, %d 条):\n", ancount)
+			answerIdx := 0
+			for {
+				answer, err := parser.Answer()
+				if err == dnsmessage.ErrSectionDone {
+					break
+				}
+				if err != nil {
+					fmt.Printf("      解析错误: %v\n", err)
+					break
+				}
+				answerIdx++
+				fmt.Printf("      [%d] %s\n", answerIdx, formatDNSResource(answer))
+			}
+		}
+
+		// 解析Authority
+		if nscount > 0 {
+			fmt.Printf("    授权记录 (Authority, %d 条):\n", nscount)
+			nsIdx := 0
+			for {
+				ns, err := parser.Authority()
+				if err == dnsmessage.ErrSectionDone {
+					break
+				}
+				if err != nil {
+					fmt.Printf("      解析错误: %v\n", err)
+					break
+				}
+				nsIdx++
+				fmt.Printf("      [%d] %s\n", nsIdx, formatDNSResource(ns))
+			}
+		}
+
+		// 解析Additional
+		if arcount > 0 {
+			fmt.Printf("    额外记录 (Additional, %d 条):\n", arcount)
+			addIdx := 0
+			for {
+				add, err := parser.Additional()
+				if err == dnsmessage.ErrSectionDone {
+					break
+				}
+				if err != nil {
+					fmt.Printf("      解析错误: %v\n", err)
+					break
+				}
+				addIdx++
+				fmt.Printf("      [%d] %s\n", addIdx, formatDNSResource(add))
+			}
+		}
+	}
 
 	fmt.Printf("    原始数据: %s\n", formatHex(respBytes, 64))
+}
+
+// formatDNSResource 格式化DNS资源记录
+func formatDNSResource(resource dnsmessage.Resource) string {
+	name := resource.Header.Name.String()
+	ttl := resource.Header.TTL
+	class := "IN"
+	rtype := DnsReqTypeToString(resource.Header.Type)
+
+	var data string
+	switch body := resource.Body.(type) {
+	case *dnsmessage.AResource:
+		data = fmt.Sprintf("%d.%d.%d.%d", body.A[0], body.A[1], body.A[2], body.A[3])
+	case *dnsmessage.AAAAResource:
+		data = net.IP(body.AAAA[:]).String()
+	case *dnsmessage.CNAMEResource:
+		data = body.CNAME.String()
+	case *dnsmessage.MXResource:
+		data = fmt.Sprintf("%d %s", body.Pref, body.MX.String())
+	case *dnsmessage.NSResource:
+		data = body.NS.String()
+	case *dnsmessage.TXTResource:
+		data = strings.Join(body.TXT, " ")
+	case *dnsmessage.SRVResource:
+		data = fmt.Sprintf("%d %d %d %s", body.Priority, body.Weight, body.Port, body.Target.String())
+	default:
+		data = fmt.Sprintf("%v", resource.Body)
+	}
+
+	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s", name, ttl, class, rtype, data)
 }
 
 // traceDNSSend 输出发送DNS响应的详细信息
