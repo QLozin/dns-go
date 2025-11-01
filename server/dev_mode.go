@@ -356,7 +356,7 @@ func formatDNSResource(resource dnsmessage.Resource) string {
 	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s", name, ttl, class, rtype, data)
 }
 
-// traceDNSSend 输出发送DNS响应的详细信息
+// traceDNSSend 输出发送DNS响应的详细信息（发送前）
 func (s *Server) traceDNSSend(respBytes []byte, clientAddr net.Addr, traceId int) {
 	if !s.hasDevMode("trace") {
 		return
@@ -365,8 +365,41 @@ func (s *Server) traceDNSSend(respBytes []byte, clientAddr net.Addr, traceId int
 	now := time.Now()
 	ts := now.Format("2006-01-02 15:04:05.000")
 
-	s.printTraceDebug("发送DNS响应", fmt.Sprintf("%d 字节 -> %s", len(respBytes), clientAddr.String()))
+	s.printTraceDebug("准备发送DNS响应", fmt.Sprintf("%d 字节 -> %s", len(respBytes), clientAddr.String()))
 	fmt.Printf("    时间戳: %s\n", ts)
+	fmt.Printf("    目标地址: %s\n", clientAddr.String())
+}
+
+// traceDNSSendResult 输出DNS响应发送结果（发送后）
+func (s *Server) traceDNSSendResult(respBytes []byte, clientAddr net.Addr, traceId int, err error) {
+	if !s.hasDevMode("trace") {
+		return
+	}
+
+	now := time.Now()
+	ts := now.Format("2006-01-02 15:04:05.000")
+
+	fmt.Printf("\n")
+	s.printTraceDebug("DNS响应发送结果", "")
+	fmt.Printf("    客户端地址: %s\n", clientAddr.String())
+	fmt.Printf("    响应大小: %d 字节\n", len(respBytes))
+	fmt.Printf("    时间戳: %s\n", ts)
+	if err != nil {
+		fmt.Printf("    状态: ❌ 发送失败\n")
+		fmt.Printf("    错误信息: %s\n", err.Error())
+		s.Logger.Error("DNS响应发送失败（trace模式）",
+			zap.String("clientAddr", clientAddr.String()),
+			zap.Int("responseSize", len(respBytes)),
+			zap.Int("traceId", traceId),
+			zap.Error(err))
+	} else {
+		fmt.Printf("    状态: ✅ 发送成功\n")
+		fmt.Printf("    已发送字节数: %d 字节\n", len(respBytes))
+		s.Logger.Debug("DNS响应发送成功（trace模式）",
+			zap.String("clientAddr", clientAddr.String()),
+			zap.Int("responseSize", len(respBytes)),
+			zap.Int("traceId", traceId))
+	}
 }
 
 // boolToIntDev 将bool转换为int (0或1)，用于dev_mode包

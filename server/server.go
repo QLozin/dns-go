@@ -172,6 +172,70 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	}
 	clientIP := clientUDPAddr.IP
 	clientCountry, clientCountryName := s.BlockManager.SearchIPCountry(clientIP)
+
+	// 早期IP检查：如果IP被阻断或国家不允许，直接返回，不打印trace日志
+	if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
+		if s.hasDevMode("trace") {
+			isBlocked := blocker.isIPBlocked(clientIP)
+			countryAllowed := blocker.isCountryAllowed(clientCountry)
+			s.Logger.Info("IP被阻断或国家不合法，阻止转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.Bool("isIPBlocked", isBlocked),
+				zap.Bool("isCountryAllowed", countryAllowed),
+				zap.String("country", clientCountry))
+		}
+		// 需要解析DNS请求以获取qname和qtype用于日志记录
+		var parser dnsmessage.Parser
+		header, err := parser.Start(reqBytes)
+		if err != nil {
+			// 解析失败时，仍然需要构造响应，但无法记录详细信息
+			return nil
+		}
+		ques, err := parser.Question()
+		if err != nil {
+			return nil
+		}
+		qtype := DnsReqTypeToString(ques.Type)
+		qname := ques.Name.String()
+		qname = strings.ToLower(qname)
+		qname = strings.TrimSuffix(qname, ".")
+
+		msg := dnsmessage.Message{
+			Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
+			Questions: []dnsmessage.Question{ques},
+		}
+		nxdomain, err := msg.Pack()
+		if err != nil {
+			s.Logger.Error("打包NXDOMAIN消息失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+			return nil
+		}
+		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
+		dnslog.ClientIP = clientIP.String()
+		dnslog.GeoCountry = clientCountryName
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+		// log-options press: 抑制未forward请求的控制台输出
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("clientCountry", clientCountryName),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+		}
+		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
+	}
+
 	var parser dnsmessage.Parser
 	header, err := parser.Start(reqBytes)
 	if err != nil {
@@ -195,8 +259,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	qname = strings.ToLower(qname)
 	qname = strings.TrimSuffix(qname, ".")
 
-	// trace模式：输出请求详情
-	s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 	msg := dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
 		Questions: []dnsmessage.Question{ques},
@@ -210,6 +272,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return nil
 	}
+
 	shouldForward := true
 	if blocker.isIPAllowed(clientIP) {
 		shouldForward = true
@@ -218,19 +281,10 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 				zap.String("clientIP", clientIP.String()),
 				zap.String("qname", qname))
 		}
-	} else if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
-		shouldForward = false
-		if s.hasDevMode("trace") {
-			isBlocked := blocker.isIPBlocked(clientIP)
-			countryAllowed := blocker.isCountryAllowed(clientCountry)
-			s.Logger.Info("IP被阻断或国家不合法，阻止转发",
-				zap.String("clientIP", clientIP.String()),
-				zap.String("qname", qname),
-				zap.Bool("isIPBlocked", isBlocked),
-				zap.Bool("isCountryAllowed", countryAllowed),
-				zap.String("country", clientCountry))
-		}
+		// trace模式：输出请求详情（IP在白名单，允许打印trace）
+		s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 	} else {
+		// 普通IP：需要检查域名
 		if blocker.isBlockedDomain(qname) {
 			shouldForward = false
 			if s.hasDevMode("trace") {
@@ -238,15 +292,20 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 					zap.String("clientIP", clientIP.String()),
 					zap.String("qname", qname))
 			}
+			// 域名被阻断，不打印trace
 		} else {
+			shouldForward = true
 			if s.hasDevMode("trace") {
 				s.Logger.Info("普通IP且域名未被阻断，允许转发",
 					zap.String("clientIP", clientIP.String()),
 					zap.String("qname", qname),
 					zap.String("country", clientCountry))
 			}
+			// trace模式：输出请求详情（域名未被阻断，允许打印trace）
+			s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 		}
 	}
+
 	if !shouldForward {
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
@@ -371,10 +430,13 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		zap.Int("traceId", traceId),
 		zap.Int("responseSize", len(resp)))
 
-	// trace模式：输出发送详情
+	// trace模式：输出准备发送详情
 	s.traceDNSSend(resp, clientAddr, traceId)
 
+	// 发送DNS响应
 	if err := s.writePacket(packet, clientAddr, resp); err != nil {
+		// trace模式：输出发送失败详情
+		s.traceDNSSendResult(resp, clientAddr, traceId, err)
 		s.Logger.Error("发送DNS响应到客户端失败",
 			zap.Error(err),
 			zap.String("clientIP", clientIP.String()),
@@ -384,6 +446,8 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return err
 	}
+	// trace模式：输出发送成功详情
+	s.traceDNSSendResult(resp, clientAddr, traceId, nil)
 	s.Logger.Debug("DNS响应已成功发送到客户端",
 		zap.String("clientIP", clientIP.String()),
 		zap.String("qname", qname),
