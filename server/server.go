@@ -654,25 +654,32 @@ func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) 
 	// 如果监听的是特定IP（不是0.0.0.0），直接使用它
 	if !localUDPAddr.IP.IsUnspecified() {
 		// 使用专门的连接，确保从正确的源IP发送
-		conn, err := net.DialUDP("udp", localUDPAddr, clientUDPAddr)
+		// 注意：不能使用已占用的端口，所以使用端口0让系统自动分配
+		sourceAddr := &net.UDPAddr{
+			IP:   localUDPAddr.IP,
+			Port: 0, // 让系统自动分配端口，避免与监听端口冲突
+		}
+		conn, err := net.DialUDP("udp", sourceAddr, clientUDPAddr)
 		if err != nil {
 			// 如果失败，尝试查找正确的源IP
 			sourceIP, sourceErr := s.getSourceIPForClient(clientUDPAddr.IP)
 			if sourceErr == nil {
-				sourceAddr := &net.UDPAddr{
+				sourceAddr = &net.UDPAddr{
 					IP:   sourceIP,
-					Port: localUDPAddr.Port,
+					Port: 0, // 让系统自动分配端口
 				}
 				conn, err = net.DialUDP("udp", sourceAddr, clientUDPAddr)
 			}
 			if err != nil {
 				// 如果仍然失败，回退到原始方法
+				s.Logger.Warn("使用指定源IP创建UDP连接失败，回退到原始方法",
+					zap.String("sourceIP", localUDPAddr.IP.String()),
+					zap.String("clientIP", clientUDPAddr.IP.String()),
+					zap.Error(err))
 				return s.writePacketFallback(packet, addr, data)
 			}
-			defer conn.Close()
-		} else {
-			defer conn.Close()
 		}
+		defer conn.Close()
 
 		deadline := time.Now().Add(5 * time.Second)
 		if err := conn.SetWriteDeadline(deadline); err != nil {
@@ -684,6 +691,16 @@ func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) 
 		}
 		if n != len(data) {
 			return fmt.Errorf("部分写入: 期望%d字节，实际写入%d字节", len(data), n)
+		}
+
+		// 记录使用的源IP（用于调试）
+		actualLocalAddr := conn.LocalAddr()
+		if actualLocalUDPAddr, ok := actualLocalAddr.(*net.UDPAddr); ok {
+			s.Logger.Debug("使用指定源IP发送响应",
+				zap.String("sourceIP", actualLocalUDPAddr.IP.String()),
+				zap.Int("sourcePort", actualLocalUDPAddr.Port),
+				zap.String("clientIP", clientUDPAddr.IP.String()),
+				zap.Int("clientPort", clientUDPAddr.Port))
 		}
 		return nil
 	}
@@ -701,7 +718,7 @@ func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) 
 	// 使用找到的源IP创建连接
 	sourceAddr := &net.UDPAddr{
 		IP:   sourceIP,
-		Port: localUDPAddr.Port,
+		Port: 0, // 让系统自动分配端口，避免端口冲突
 	}
 	conn, err := net.DialUDP("udp", sourceAddr, clientUDPAddr)
 	if err != nil {
@@ -727,10 +744,13 @@ func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) 
 	}
 
 	// 记录使用的源IP（用于调试）
-	if s.hasDevMode("trace") {
+	actualLocalAddr := conn.LocalAddr()
+	if actualLocalUDPAddr, ok := actualLocalAddr.(*net.UDPAddr); ok {
 		s.Logger.Debug("使用指定源IP发送响应",
-			zap.String("sourceIP", sourceIP.String()),
-			zap.String("clientIP", clientUDPAddr.IP.String()))
+			zap.String("sourceIP", actualLocalUDPAddr.IP.String()),
+			zap.Int("sourcePort", actualLocalUDPAddr.Port),
+			zap.String("clientIP", clientUDPAddr.IP.String()),
+			zap.Int("clientPort", clientUDPAddr.Port))
 	}
 	return nil
 }
@@ -741,6 +761,16 @@ func (s *Server) writePacketFallback(packet net.PacketConn, addr net.Addr, data 
 	if err := packet.SetWriteDeadline(deadline); err != nil {
 		return fmt.Errorf("设置写入截止时间失败: %w", err)
 	}
+
+	// 记录回退方法的使用（用于调试）
+	localAddr := packet.LocalAddr()
+	if localUDPAddr, ok := localAddr.(*net.UDPAddr); ok {
+		s.Logger.Debug("使用回退方法发送响应",
+			zap.String("localAddr", localUDPAddr.String()),
+			zap.String("remoteAddr", addr.String()),
+			zap.Int("dataSize", len(data)))
+	}
+
 	n, err := packet.WriteTo(data, addr)
 	if err != nil {
 		return fmt.Errorf("写入UDP数据包失败: %w", err)
