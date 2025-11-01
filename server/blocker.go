@@ -27,6 +27,7 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 		stopCh:         make(chan struct{}),
 		domainSet:      make(Set, 10240),
 		whiteDomainSet: make(Set, 10240),
+		whiteIPSet:     make([]net.IPNet, 0, 10240),
 	}
 	writeLockFirst := os.Getenv("GO_RWMUTEX_WRITESTARVATION")
 	if writeLockFirst == "" || writeLockFirst == "0" {
@@ -34,6 +35,10 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 	}
 	blocker.GeoReady.Store(false)
 	blocker.DomainListReady.Store(false)
+	for _, i := range []string{"100.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"} {
+		_, network, _ := net.ParseCIDR(i)
+		blocker.whiteIPSet = append(blocker.whiteIPSet, *network)
+	}
 	return blocker
 }
 
@@ -304,21 +309,28 @@ func (b *Blocker) geoip2DumpToFile(path string, data []byte) error {
 }
 
 func (b *Blocker) SearchIPCountry(ip net.IP) (string, string) {
-	geoDB := b.geoDB.Load()
-	if geoDB == nil {
-		b.Logger.Error("GeoIP2文件未加载")
-		return "", ""
-	}
-	rec, err := geoDB.Country(ip)
-	if err != nil {
-		b.Logger.Error("GeoIP2文件搜索IP国家失败", zap.Error(err))
-		return "", ""
-	}
-	var code = rec.Country.IsoCode
-	var name = rec.Country.Names["zh-CN"]
-	if code == "" || name == "" {
-		b.Logger.Info(fmt.Sprintf("没有找到IP国家信息，查询的IP：%s, 国家代码：%s, 国家名称：%s", ip.String(), code, name))
-		return "", ""
+	var code string
+	var name string
+	if b.isLocalIP(ip) {
+		code = "Local"
+		name = "本地"
+	} else {
+		geoDB := b.geoDB.Load()
+		if geoDB == nil {
+			b.Logger.Error("GeoIP2文件未加载")
+			return "", ""
+		}
+		rec, err := geoDB.Country(ip)
+		if err != nil {
+			b.Logger.Error("GeoIP2文件搜索IP国家失败", zap.Error(err))
+			return "", ""
+		}
+		code = rec.Country.IsoCode
+		name = rec.Country.Names["zh-CN"]
+		if code == "" || name == "" {
+			b.Logger.Info(fmt.Sprintf("没有找到IP国家信息，查询的IP：%s, 国家代码：%s, 国家名称：%s", ip.String(), code, name))
+			return "", ""
+		}
 	}
 	b.Logger.Info(fmt.Sprintf("成功查询IP %s 的国家信息, 国家代码：%s, 国家名称：%s", ip.String(), code, name))
 	return code, name
@@ -361,9 +373,22 @@ func (b *Blocker) isBlockedDomain(domain string) bool {
 
 func (b *Blocker) isCountryAllowed(countryCode string) bool {
 	countryCode = strings.ToLower(countryCode)
-	return countryCode == "cn"
+	return countryCode == "cn" || countryCode == "local"
 }
 
 func (b *Blocker) isIPAllowed(ip net.IP) bool {
-	return true
+	if b.isLocalIP(ip) {
+		return true
+	}
+
+	return false
+}
+
+func (b *Blocker) isLocalIP(ip net.IP) bool {
+	for _, ipnet := range b.whiteIPSet {
+		if ipnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

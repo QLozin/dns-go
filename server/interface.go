@@ -99,6 +99,7 @@ type Blocker struct {
 	mutexes         BlockerMutex
 	domainSet       Set
 	whiteDomainSet  Set
+	whiteIPSet      []net.IPNet
 	stopCh          chan struct{}
 	ctx             context.Context
 	geoDB           atomic.Pointer[geoip2.Reader]

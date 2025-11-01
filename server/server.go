@@ -132,14 +132,11 @@ func (s *Server) serveAtUDP(ctx context.Context) error {
 		copiedNumber, addr, err := packet.ReadFrom(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// 超时是正常的，检查上下文
 				if ctx.Err() != nil {
-					// 上下文取消，正常退出，不记录为错误
 					return ctx.Err()
 				}
-				continue // 超时继续循环
+				continue
 			}
-			// 边界层：非超时的网络读取错误，必须记录
 			s.Logger.Error("UDP读取失败", zap.Error(err))
 			return fmt.Errorf("UDP读取失败: %w", err)
 		}
@@ -164,23 +161,21 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	blocker := s.BlockManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
-		// 业务层：类型错误可能是客户端问题，用 Debug
 		s.Logger.Debug("客户端地址类型异常",
 			zap.Any("clientAddr", clientAddr),
 			zap.Int("traceId", traceId))
-		return nil // 不返回错误，避免在调用层记录
+		return nil
 	}
 	clientIP := clientUDPAddr.IP
 	clientCountry, clientCountryName := s.BlockManager.SearchIPCountry(clientIP)
 	var parser dnsmessage.Parser
 	header, err := parser.Start(reqBytes)
 	if err != nil {
-		// 业务层：客户端发送了错误格式的请求，用 Debug（不是系统错误）
 		s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
 			zap.Error(err),
 			zap.String("clientIP", clientIP.String()),
 			zap.Int("traceId", traceId))
-		return nil // 不返回错误，避免在调用层记录
+		return nil
 	}
 	ques, err := parser.Question()
 	if err != nil {
@@ -211,17 +206,14 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Error(err),
 			zap.String("clientIP", clientIP.String()),
 			zap.Int("traceId", traceId))
-		return nil // 错误已记录，不返回避免重复
+		return nil
 	}
 	if (qname != "" && !blocker.isIPAllowed(clientIP)) || !blocker.isCountryAllowed(clientCountry) || (blocker.isBlockedDomain(qname) && !blocker.isWhiteDomain(qname)) {
-		// 业务层：这是业务事件（阻止请求），记录为 Info
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
 		dnslog.GeoCountry = clientCountryName
 		if err := s.DB.InsertDnsLog(dnslog); err != nil {
-			// 基础设施错误已在 InsertDnsLog 中记录，这里不重复记录
 		}
-		// 业务事件：成功阻止请求
 		s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
 			zap.String("clientIP", clientIP.String()),
 			zap.String("clientCountry", clientCountryName),
