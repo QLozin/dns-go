@@ -1,4 +1,4 @@
-package newdns
+package server
 
 import (
 	"bufio"
@@ -76,6 +76,10 @@ func (this *Blocker) Start() error {
 		this.Logger.Info("上下文取消，Blocker退出")
 		return this.ctx.Err()
 	}
+}
+
+func (this *Blocker) Stop() {
+	close(this.stopCh)
 }
 
 func (this *Blocker) getDomainSet() Set {
@@ -341,10 +345,10 @@ func (this *Blocker) isBlockedDomain(domain string) bool {
 
 func (this *Blocker) isCountryAllowed(countryCode string) bool {
 	countryCode = strings.ToLower(countryCode)
-	if countryCode == "cn"  {
+	if countryCode == "cn" {
 		return true
 	}
-	return false	
+	return false
 }
 
 func (this *Blocker) isIPAllowed(ip net.IP) bool {

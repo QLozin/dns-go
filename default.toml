@@ -1,0 +1,45 @@
+# DNS服务器默认配置文件
+# 该配置可以直接运行程序
+
+[server]
+# UDP监听端口
+udp_port = ":53"
+# 上游DNS服务器列表
+upstream_dns = ["8.8.8.8:53", "8.8.4.4:53"]
+# 读取超时时间
+read_timeout = "5s"
+# 写入超时时间
+write_timeout = "5s"
+
+[block]
+# 需要阻止的域名列表
+block_domains = []
+# 白名单域名列表
+white_domains = []
+# 域名订阅URL列表（用于自动更新黑名单）
+block_subscribe_urls = []
+# GeoIP2数据库下载URL
+geoip2_url = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
+# 刷新间隔（小时）
+refresh_hours = 6
+# 工作目录（用于存储域名列表和GeoIP2文件）
+dir = "./block"
+
+[log]
+# 日志目录
+dir = "./logs"
+# 日志级别: debug, info, warn, error
+level = "info"
+# 日志轮转天数
+rotate_days = 7
+# 日志轮转大小（字节）
+rotate_size = 10485760
+
+[db]
+# SQLite数据库文件路径
+sqlite_path = "./data/dns.db"
+# 最大连接数
+max_connections = 10
+# 数据库目录
+dir = "./data"
+

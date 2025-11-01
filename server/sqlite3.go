@@ -1,4 +1,4 @@
-package newdns
+package server
 
 import (
 	"database/sql"

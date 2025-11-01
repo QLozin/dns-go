@@ -1,4 +1,4 @@
-package newdns
+package server
 
 import (
 	"context"
@@ -161,7 +161,7 @@ func (this *Server) serveAtUDP(ctx context.Context) error {
 
 func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, reqBytes []byte, packet net.PacketConn) error {
 	traceId, _ := ctx.Value("traceId").(int)
-	blocker := this.blockerManager
+	blocker := this.BlockManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
 		// 业务层：类型错误可能是客户端问题，用 Debug
@@ -171,7 +171,7 @@ func (this *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, 
 		return nil // 不返回错误，避免在调用层记录
 	}
 	clientIP := clientUDPAddr.IP
-	clientCountry, clientCountryName := this.blockerManager.SearchIPCountry(clientIP)
+	clientCountry, clientCountryName := this.BlockManager.SearchIPCountry(clientIP)
 	var parser dnsmessage.Parser
 	header, err := parser.Start(reqBytes)
 	if err != nil {

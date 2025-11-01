@@ -1,8 +1,10 @@
-package newdns
+package server
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -112,8 +114,12 @@ type BlockerMutex struct {
 
 func LoadConfig(path string) (*Config, error) {
 	var cfg Config
-	if _, err := toml.Decode(path, &cfg); err != nil {
-		return nil, err
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %w", err)
 	}
 	return &cfg, nil
 }
