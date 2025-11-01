@@ -194,7 +194,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 				zap.String("clientIP", clientIP.String()),
 				zap.Int("traceId", traceId))
 		}
-		return nil // 不返回错误，避免在调用层记录
+		return nil
 	}
 	qtype := DnsReqTypeToString(ques.Type)
 	qname := ques.Name.String()
