@@ -80,7 +80,9 @@ type ServerOptions struct {
 	ServerConfig ServerConfig
 	BlockManager *Blocker
 	Logger       *zap.Logger
-	DB           *DB // 使用新的 DB 类型替代 *sql.DB
+	DB           *DB      // 使用新的 DB 类型替代 *sql.DB
+	DevModes     []string // 开发模式列表：hook（forward时返回127.127.127.127）、trace（详细调试输出）
+	LogOptions   []string // 日志选项列表：press（抑制未forward请求的控制台输出）
 }
 
 type BlockOptions struct {
@@ -158,5 +160,17 @@ func WithBlockConfig(cfg BlockConfig) func(opts_ *BlockOptions) {
 func WithDBConfig(logger *zap.Logger) func(opts_ *DBOptions) {
 	return func(opts_ *DBOptions) {
 		opts_.Logger = logger
+	}
+}
+
+func WithDevModes(devModes []string) func(opts_ *ServerOptions) {
+	return func(opts_ *ServerOptions) {
+		opts_.DevModes = devModes
+	}
+}
+
+func WithLogOptions(logOptions []string) func(opts_ *ServerOptions) {
+	return func(opts_ *ServerOptions) {
+		opts_.LogOptions = logOptions
 	}
 }

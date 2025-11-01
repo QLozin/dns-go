@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 
 var (
 	configPath = flag.String("config", "default.toml", "配置文件路径")
+	devMode    = flag.String("dev", "", "开发模式（可用逗号分隔多个）: hook（forward时返回127.127.127.127）、trace（详细调试输出）")
+	logOptions = flag.String("log-options", "", "日志选项（可用逗号分隔多个）: press（抑制未forward请求的控制台输出）")
 	version    = "1.0.0"
 )
 
@@ -203,12 +206,48 @@ func main() {
 		}
 	}
 
+	// 解析dev模式（支持逗号分隔的多个值）
+	var devModes []string
+	if *devMode != "" {
+		modes := strings.Split(*devMode, ",")
+		for _, m := range modes {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				devModes = append(devModes, m)
+			}
+		}
+		if len(devModes) > 0 {
+			logger.Info("开发模式已启用", zap.Strings("模式", devModes))
+		}
+	}
+
+	// 解析log选项（支持逗号分隔的多个值）
+	var logOpts []string
+	if *logOptions != "" {
+		opts := strings.Split(*logOptions, ",")
+		for _, opt := range opts {
+			opt = strings.TrimSpace(opt)
+			if opt != "" {
+				logOpts = append(logOpts, opt)
+			}
+		}
+		if len(logOpts) > 0 {
+			logger.Info("日志选项已启用", zap.Strings("选项", logOpts))
+		}
+	}
+
 	// 初始化Server
 	serverOptions := []func(*server.ServerOptions){
 		server.WithServerConfig(cfg.ServerConfig),
 		server.WithLogger(logger),
 		server.WithBlockManager(blocker),
 		server.WithDB(db),
+	}
+	if len(devModes) > 0 {
+		serverOptions = append(serverOptions, server.WithDevModes(devModes))
+	}
+	if len(logOpts) > 0 {
+		serverOptions = append(serverOptions, server.WithLogOptions(logOpts))
 	}
 	dnsServer := server.NewServer(ctx, serverOptions...)
 

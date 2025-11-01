@@ -186,6 +186,9 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	qname := ques.Name.String()
 	qname = strings.ToLower(qname)
 	qname = strings.TrimSuffix(qname, ".")
+
+	// trace模式：输出请求详情
+	s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 	msg := dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
 		Questions: []dnsmessage.Question{ques},
@@ -216,11 +219,14 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		dnslog.GeoCountry = clientCountryName
 		if err := s.DB.InsertDnsLog(dnslog); err != nil {
 		}
-		s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
-			zap.String("clientIP", clientIP.String()),
-			zap.String("clientCountry", clientCountryName),
-			zap.String("qname", qname),
-			zap.Int("traceId", traceId))
+		// log-options press: 抑制未forward请求的控制台输出
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("clientCountry", clientCountryName),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+		}
 		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
 			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
 				zap.Error(err),
@@ -231,6 +237,12 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		}
 		return nil
 	}
+
+	// hook模式：在forward时返回127.127.127.127（仅在shouldForward为true时执行）
+	if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, packet, clientIP, traceId, qname, qtype); handled {
+		return err
+	}
+
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
 	if err != nil || len(resp) == 0 {
 		errorMsg := ""
@@ -303,6 +315,19 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil
 	}
 
+	// 解析响应头用于trace模式
+	var respHeader dnsmessage.Header
+	if s.hasDevMode("trace") {
+		var respParser dnsmessage.Parser
+		h, err := respParser.Start(resp)
+		if err == nil {
+			respHeader = h
+		}
+	}
+
+	// trace模式：输出响应详情
+	s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+
 	// 业务事件：成功响应，记录为 Debug（避免日志过多，只记录关键信息）
 	s.Logger.Debug("DNS请求成功响应",
 		zap.String("clientIP", clientIP.String()),
@@ -311,6 +336,10 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		zap.String("rtt", dnslog.RTT),
 		zap.Int("traceId", traceId),
 		zap.Int("responseSize", len(resp)))
+
+	// trace模式：输出发送详情
+	s.traceDNSSend(resp, clientAddr, traceId)
+
 	if err := s.writePacket(packet, clientAddr, resp); err != nil {
 		s.Logger.Error("发送DNS响应到客户端失败",
 			zap.Error(err),
@@ -402,6 +431,16 @@ func (s *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsL
 		QType:    qtype,
 		MsgId:    msgId,
 	}
+}
+
+// hasLogOption 检查是否启用了指定的日志选项
+func (s *Server) hasLogOption(option string) bool {
+	for _, opt := range s.LogOptions {
+		if opt == option {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) error {
