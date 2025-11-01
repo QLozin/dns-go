@@ -380,7 +380,7 @@ func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, 
 		zap.String("clientIP", clientIP.String()),
 		zap.Int("traceId", traceId),
 		zap.Int("requestSize", len(reqBytes)),
-		zap.String("requestHex", BytesToHex(reqBytes, 512)),
+		// zap.String("requestHex", BytesToHex(reqBytes, 512)),
 		zap.Any("dnsHeader", headerInfo),
 	}
 
