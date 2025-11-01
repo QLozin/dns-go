@@ -161,9 +161,13 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	blocker := s.BlockManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
-		s.Logger.Debug("客户端地址类型异常",
-			zap.Any("clientAddr", clientAddr),
-			zap.Int("traceId", traceId))
+		// log-options press: 抑制未forward请求的控制台输出
+		// 地址类型异常意味着请求不会被处理，所以应该被抑制
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("客户端地址类型异常",
+				zap.Any("clientAddr", clientAddr),
+				zap.Int("traceId", traceId))
+		}
 		return nil
 	}
 	clientIP := clientUDPAddr.IP
@@ -171,10 +175,14 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	var parser dnsmessage.Parser
 	header, err := parser.Start(reqBytes)
 	if err != nil {
-		s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
-			zap.Error(err),
-			zap.String("clientIP", clientIP.String()),
-			zap.Int("traceId", traceId))
+		// log-options press: 抑制未forward请求的控制台输出
+		// 解析请求头失败意味着请求不会被forward，所以应该被抑制
+		if !s.hasLogOption("press") {
+			s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+		}
 		return nil
 	}
 	ques, err := parser.Question()
@@ -392,6 +400,12 @@ func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float
 }
 
 func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, header dnsmessage.Header, reqBytes []byte) {
+	// log-options press: 抑制未forward请求的控制台输出
+	// 解析错误意味着请求不会被forward，所以应该被抑制
+	if s.hasLogOption("press") {
+		return
+	}
+
 	headerInfo := map[string]interface{}{
 		"id":     header.ID,
 		"opcode": header.OpCode,
