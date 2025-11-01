@@ -65,6 +65,7 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 		domainSet:      make(Set, 10240),
 		whiteDomainSet: make(Set, 10240),
 		whiteIPSet:     &IPSet{},
+		blockIPSet:     &IPSet{},
 		localIPSet:     &IPSet{},
 	}
 	writeLockFirst := os.Getenv("GO_RWMUTEX_WRITESTARVATION")
@@ -78,6 +79,9 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 	}
 	for _, i := range blocker.BlockConfig.WhiteIPs {
 		blocker.whiteIPSet.Add(i)
+	}
+	for _, i := range blocker.BlockConfig.BlockIPs {
+		blocker.blockIPSet.Add(i)
 	}
 	return blocker
 }
@@ -454,10 +458,17 @@ func (b *Blocker) isCountryAllowed(countryCode string) bool {
 }
 
 func (b *Blocker) isIPAllowed(ip net.IP) bool {
-	if b.localIPSet.Contains(ip.String()) || b.whiteIPSet.Contains(ip.String()) {
+	ip_str := ip.String()
+	if b.whiteIPSet.Contains(ip_str) {
 		return true
 	}
-	return false
+	if b.localIPSet.Contains(ip_str) {
+		return true
+	}
+	if b.blockIPSet.Contains(ip_str) {
+		return false
+	}
+	return true
 }
 
 func (b *Blocker) isLocalIP(ip net.IP) bool {

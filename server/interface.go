@@ -102,6 +102,7 @@ type Blocker struct {
 	domainSet       Set
 	whiteDomainSet  Set
 	whiteIPSet      *IPSet
+	blockIPSet      *IPSet
 	localIPSet      *IPSet
 	stopCh          chan struct{}
 	ctx             context.Context
