@@ -199,32 +199,18 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return nil
 	}
-	// 优先检查IP是否在白名单中，如果在白名单则直接放行（不检查国家代码和域名）
+	shouldForward := true
 	if blocker.isIPAllowed(clientIP) {
-		// IP在白名单或本地IP中，直接放行
-	} else if !blocker.isCountryAllowed(clientCountry) {
-		// IP不在白名单中，且国家代码不允许，阻止请求
-		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
-		dnslog.ClientIP = clientIP.String()
-		dnslog.GeoCountry = clientCountryName
-		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		shouldForward = true
+
+	} else if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
+		shouldForward = false
+	} else {
+		if blocker.isBlockedDomain(qname) {
+			shouldForward = false
 		}
-		s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
-			zap.String("clientIP", clientIP.String()),
-			zap.String("clientCountry", clientCountryName),
-			zap.String("qname", qname),
-			zap.Int("traceId", traceId))
-		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
-			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
-				zap.Error(err),
-				zap.String("clientIP", clientIP.String()),
-				zap.String("qname", qname),
-				zap.Int("traceId", traceId))
-			return err
-		}
-		return nil
-	} else if blocker.isBlockedDomain(qname) && !blocker.isWhiteDomain(qname) {
-		// 域名在黑名单中且不在白名单中，阻止请求
+	}
+	if !shouldForward {
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
 		dnslog.GeoCountry = clientCountryName
@@ -247,7 +233,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	}
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
 	if err != nil || len(resp) == 0 {
-		// 业务层：转发失败是业务事件，记录为 Warn（已入库）
 		errorMsg := ""
 		if err != nil {
 			errorMsg = err.Error()

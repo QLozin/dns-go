@@ -392,7 +392,7 @@ func (b *Blocker) geoip2DumpToFile(path string, data []byte) error {
 func (b *Blocker) SearchIPCountry(ip net.IP) (string, string) {
 	var code string
 	var name string
-	if b.isLocalIP(ip) {
+	if b.localIPSet.Contains(ip.String()) {
 		code = "Local"
 		name = "本地"
 	} else {
@@ -459,18 +459,9 @@ func (b *Blocker) isCountryAllowed(countryCode string) bool {
 
 func (b *Blocker) isIPAllowed(ip net.IP) bool {
 	ip_str := ip.String()
-	if b.whiteIPSet.Contains(ip_str) {
-		return true
-	}
-	if b.localIPSet.Contains(ip_str) {
-		return true
-	}
-	if b.blockIPSet.Contains(ip_str) {
-		return false
-	}
-	return true
+	return b.localIPSet.Contains(ip_str) || b.whiteIPSet.Contains(ip_str)
 }
 
-func (b *Blocker) isLocalIP(ip net.IP) bool {
-	return b.localIPSet.Contains(ip.String())
+func (b *Blocker) isIPBlocked(ip net.IP) bool {
+	return b.blockIPSet.Contains(ip.String())
 }
