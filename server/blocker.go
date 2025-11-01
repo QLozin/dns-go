@@ -74,7 +74,7 @@ func NewBlockManager(ctx context.Context, opts ...func(*BlockOptions)) *Blocker 
 	}
 	blocker.GeoReady.Store(false)
 	blocker.DomainListReady.Store(false)
-	for _, i := range []string{"100.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"} {
+	for _, i := range []string{"127.0.0.0/8", "100.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"} {
 		blocker.localIPSet.Add(i)
 	}
 	for _, i := range blocker.BlockConfig.WhiteIPs {
