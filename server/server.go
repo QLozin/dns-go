@@ -210,7 +210,15 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.String("clientCountry", clientCountryName),
 			zap.String("qname", qname),
 			zap.Int("traceId", traceId))
-		return s.writePacket(packet, clientAddr, nxdomain)
+		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
 	}
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
 	if err != nil || len(resp) == 0 {
@@ -245,7 +253,15 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.String("upstreamDNS", s.upstreamDNS[0].String()),
 			zap.Error(err),
 			zap.Int("traceId", traceId))
-		return s.writePacket(packet, clientAddr, nxdomain)
+		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+			s.Logger.Error("发送SERVFAIL响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
 	}
 	dnslog := DnsLog{
 		Time:        TimeNow(),
@@ -263,14 +279,43 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	if err := s.DB.InsertDnsLog(dnslog); err != nil {
 		// 基础设施错误已在 InsertDnsLog 中记录，这里不重复记录
 	}
+	// 验证响应数据的有效性（至少包含DNS头部）
+	if len(resp) < 12 {
+		s.Logger.Error("上游DNS响应数据过短，无法解析",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		// 返回SERVFAIL响应
+		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+			s.Logger.Error("发送SERVFAIL响应失败", zap.Error(err))
+		}
+		return nil
+	}
+
 	// 业务事件：成功响应，记录为 Debug（避免日志过多，只记录关键信息）
 	s.Logger.Debug("DNS请求成功响应",
 		zap.String("clientIP", clientIP.String()),
 		zap.String("qname", qname),
 		zap.String("qtype", qtype),
 		zap.String("rtt", dnslog.RTT),
+		zap.Int("traceId", traceId),
+		zap.Int("responseSize", len(resp)))
+	if err := s.writePacket(packet, clientAddr, resp); err != nil {
+		s.Logger.Error("发送DNS响应到客户端失败",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.String("qtype", qtype),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		return err
+	}
+	s.Logger.Debug("DNS响应已成功发送到客户端",
+		zap.String("clientIP", clientIP.String()),
+		zap.String("qname", qname),
 		zap.Int("traceId", traceId))
-	return s.writePacket(packet, clientAddr, resp)
+	return nil
 }
 
 func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float64, error) {
@@ -350,7 +395,19 @@ func (s *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsL
 }
 
 func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) error {
-	_ = packet.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_, err := packet.WriteTo(data, addr)
-	return err
+	if len(data) == 0 {
+		return fmt.Errorf("尝试发送空响应数据")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	if err := packet.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("设置写入截止时间失败: %w", err)
+	}
+	n, err := packet.WriteTo(data, addr)
+	if err != nil {
+		return fmt.Errorf("写入UDP数据包失败: %w", err)
+	}
+	if n != len(data) {
+		return fmt.Errorf("部分写入: 期望%d字节，实际写入%d字节", len(data), n)
+	}
+	return nil
 }
