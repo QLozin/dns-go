@@ -23,7 +23,7 @@ block_ips = []
 # 域名订阅URL列表（用于自动更新黑名单）
 block_subscribe_urls = []
 # GeoIP2数据库下载URL
-geoip2_url = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"
+geoip2_url = "https://github.com/Loyalsoldier/geoip/releases/download/202510300021/Country.mmdb"
 # 刷新间隔（小时）
 refresh_hours = 6
 # 工作目录（用于存储域名列表和GeoIP2文件）
