@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 
 var (
 	configPath = flag.String("config", "default.toml", "配置文件路径")
-	logOptions = flag.String("log-options", "", "日志选项（可用逗号分隔多个）: press（抑制未forward请求的控制台输出）")
 	version    = "1.0.0"
 )
 
@@ -205,30 +203,12 @@ func main() {
 		}
 	}
 
-	// 解析log选项（支持逗号分隔的多个值）
-	var logOpts []string
-	if *logOptions != "" {
-		opts := strings.Split(*logOptions, ",")
-		for _, opt := range opts {
-			opt = strings.TrimSpace(opt)
-			if opt != "" {
-				logOpts = append(logOpts, opt)
-			}
-		}
-		if len(logOpts) > 0 {
-			logger.Info("日志选项已启用", zap.Strings("选项", logOpts))
-		}
-	}
-
 	// 初始化Server
 	serverOptions := []func(*server.ServerOptions){
 		server.WithServerConfig(cfg.ServerConfig),
 		server.WithLogger(logger),
 		server.WithBlockManager(blocker),
 		server.WithDB(db),
-	}
-	if len(logOpts) > 0 {
-		serverOptions = append(serverOptions, server.WithLogOptions(logOpts))
 	}
 	dnsServer := server.NewServer(ctx, serverOptions...)
 

@@ -48,7 +48,6 @@ func (s *Server) Start() error {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// 边界层：panic 是系统级错误，必须记录
 				s.Logger.Error("UDP服务发生panic", zap.Any("panic", r), zap.Stack("stack"))
 			}
 		}()
@@ -57,12 +56,10 @@ func (s *Server) Start() error {
 	select {
 	case <-s.ctx.Done():
 		s.Stop()
-		// 边界层：上下文取消是正常关闭，记录为 Info
 		s.Logger.Info("Server收到上下文取消信号，正常退出", zap.Error(s.ctx.Err()))
 		return s.ctx.Err()
 	case err := <-udpErrCh:
 		s.Stop()
-		// 边界层：UDP服务错误是系统级错误，必须记录
 		s.Logger.Error("UDP服务发生错误，Server退出", zap.Error(err))
 		return err
 	}
@@ -73,7 +70,6 @@ func (s *Server) resolveUpstreamDNS() error {
 	for _, upstrm := range s.ServerConfig.UpstreamDNS {
 		addr, err := net.ResolveUDPAddr("udp", upstrm)
 		if err != nil {
-			// 部分失败：记录为 Warn（不是致命错误，可以继续尝试其他上游DNS）
 			s.Logger.Warn("解析上游DNS地址失败，跳过",
 				zap.String("upstream", upstrm),
 				zap.Error(err))
@@ -82,7 +78,6 @@ func (s *Server) resolveUpstreamDNS() error {
 		s.upstreamDNS = append(s.upstreamDNS, *addr)
 	}
 	if len(s.upstreamDNS) == 0 {
-		// 全部失败：返回错误（调用层会记录为 Error）
 		return fmt.Errorf("没有可用的上游DNS，已尝试: %s", strings.Join(s.ServerConfig.UpstreamDNS, ","))
 	}
 	return nil
@@ -120,7 +115,6 @@ func (s *Server) waitBlockerStart() error {
 }
 
 func (s *Server) serveAtUDP(ctx context.Context) error {
-	// 边界层：网络监听失败是系统级错误，必须记录
 	packet, err := net.ListenPacket("udp", s.ServerConfig.UdpPort)
 	if err != nil {
 		s.Logger.Error("UDP监听失败",
@@ -150,7 +144,6 @@ func (s *Server) serveAtUDP(ctx context.Context) error {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					// 边界层：panic 是系统级错误，必须记录
 					s.Logger.Error("处理UDP请求时发生panic",
 						zap.Any("panic", r),
 						zap.Stack("stack"))
@@ -166,30 +159,21 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	blocker := s.BlockManager
 	clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 	if !ok {
-		// log-options press: 抑制未forward请求的控制台输出
-		// 地址类型异常意味着请求不会被处理，所以应该被抑制
-		if !s.hasLogOption("press") {
-			s.Logger.Debug("客户端地址类型异常",
-				zap.Any("clientAddr", clientAddr),
-				zap.Int("traceId", traceId))
-		}
+		s.Logger.Debug("客户端地址类型异常",
+			zap.Any("clientAddr", clientAddr),
+			zap.Int("traceId", traceId))
 		return nil
 	}
 	clientIP := clientUDPAddr.IP
 	clientCountry, clientCountryName := s.BlockManager.SearchIPCountry(clientIP)
 
-	// 解析DNS请求（只解析一次）
 	var parser dnsmessage.Parser
 	header, err := parser.Start(reqBytes)
 	if err != nil {
-		// log-options press: 抑制未forward请求的控制台输出
-		// 解析请求头失败意味着请求不会被forward，所以应该被抑制
-		if !s.hasLogOption("press") {
-			s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
-				zap.Error(err),
-				zap.String("clientIP", clientIP.String()),
-				zap.Int("traceId", traceId))
-		}
+		s.Logger.Debug("客户端请求格式错误（解析请求头失败）",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.Int("traceId", traceId))
 		return nil
 	}
 	ques, err := parser.Question()
@@ -223,15 +207,12 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		dnslog.GeoCountry = clientCountryName
 		if err := s.DB.InsertDnsLog(dnslog); err != nil {
 		}
-		// log-options press: 抑制未forward请求的控制台输出
-		if !s.hasLogOption("press") {
-			s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
-				zap.String("clientIP", clientIP.String()),
-				zap.String("clientCountry", clientCountryName),
-				zap.String("qname", qname),
-				zap.String("reason", reason),
-				zap.Int("traceId", traceId))
-		}
+		s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("clientCountry", clientCountryName),
+			zap.String("qname", qname),
+			zap.String("reason", reason),
+			zap.Int("traceId", traceId))
 		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
 			s.Logger.Error("发送NXDOMAIN响应到客户端失败",
 				zap.Error(err),
@@ -288,10 +269,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			UpstreamDNS: s.upstreamDNS[0].String(),
 			Error:       errorMsg,
 		}
-		if err := s.DB.InsertDnsLog(dnslog); err != nil {
-			// 基础设施错误已在 InsertDnsLog 中记录，这里不重复记录
-		}
-		// 业务事件：转发失败，记录为 Warn（不是系统错误）
+		_ = s.DB.InsertDnsLog(dnslog)
 		s.Logger.Warn("DNS转发失败",
 			zap.String("clientIP", clientIP.String()),
 			zap.String("qname", qname),
@@ -321,9 +299,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		GeoCountry:  clientCountryName,
 		UpstreamDNS: s.upstreamDNS[0].String(),
 	}
-	if err := s.DB.InsertDnsLog(dnslog); err != nil {
-		// 基础设施错误已在 InsertDnsLog 中记录，这里不重复记录
-	}
+	_ = s.DB.InsertDnsLog(dnslog)
 	// 验证响应数据的有效性（至少包含DNS头部）
 	if len(resp) < 12 {
 		s.Logger.Error("上游DNS响应数据过短，无法解析",
@@ -338,7 +314,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil
 	}
 
-	// 业务事件：成功响应，记录为 Debug（避免日志过多，只记录关键信息）
 	s.Logger.Debug("DNS请求成功响应",
 		zap.String("clientIP", clientIP.String()),
 		zap.String("qname", qname),
@@ -358,16 +333,11 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return err
 	}
-	s.Logger.Debug("DNS响应已成功发送到客户端",
-		zap.String("clientIP", clientIP.String()),
-		zap.String("qname", qname),
-		zap.Int("traceId", traceId))
 	return nil
 }
 
 func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float64, error) {
 	traceId, _ := ctx.Value("traceId").(int)
-	// 基础设施层：只包装错误，不记录日志（由调用层决定是否记录）
 	if len(s.upstreamDNS) == 0 {
 		return nil, 0, fmt.Errorf("%d: 没有可用的上游DNS", traceId)
 	}
@@ -400,12 +370,6 @@ func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float
 }
 
 func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, header dnsmessage.Header, reqBytes []byte) {
-	// log-options press: 抑制未forward请求的控制台输出
-	// 解析错误意味着请求不会被forward，所以应该被抑制
-	if s.hasLogOption("press") {
-		return
-	}
-
 	headerInfo := map[string]interface{}{
 		"id":     header.ID,
 		"opcode": header.OpCode,
@@ -423,7 +387,6 @@ func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, 
 		zap.String("clientIP", clientIP.String()),
 		zap.Int("traceId", traceId),
 		zap.Int("requestSize", len(reqBytes)),
-		// zap.String("requestHex", BytesToHex(reqBytes, 512)),
 		zap.Any("dnsHeader", headerInfo),
 	}
 
@@ -445,16 +408,6 @@ func (s *Server) buildNXDomainDNSLog(msgId int, qname string, qtype string) DnsL
 		QType:    qtype,
 		MsgId:    msgId,
 	}
-}
-
-// hasLogOption 检查是否启用了指定的日志选项
-func (s *Server) hasLogOption(option string) bool {
-	for _, opt := range s.LogOptions {
-		if opt == option {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) writePacket(packet net.PacketConn, addr net.Addr, data []byte) error {
