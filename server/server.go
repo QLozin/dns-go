@@ -223,13 +223,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		dnslog.GeoCountry = clientCountryName
 		if err := s.DB.InsertDnsLog(dnslog); err != nil {
 		}
-		// log-options press: 当press启用时，抑制被阻断请求的所有trace日志（只关注被forward的结果）
-		if s.hasDevMode("trace") && !s.hasLogOption("press") {
-			s.Logger.Info(reason,
-				zap.String("clientIP", clientIP.String()),
-				zap.String("qname", qname),
-				zap.String("country", clientCountry))
-		}
 		// log-options press: 抑制未forward请求的控制台输出
 		if !s.hasLogOption("press") {
 			s.Logger.Debug("DNS请求被阻止（返回NXDOMAIN）",
@@ -252,71 +245,25 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 
 	// 1. IP白名单检查：如果在白名单，直接允许，跳过后续检查
 	if blocker.isIPAllowed(clientIP) {
-		if s.hasDevMode("trace") {
-			s.Logger.Info("IP在白名单中，允许转发",
-				zap.String("clientIP", clientIP.String()),
-				zap.String("qname", qname))
-		}
-		// trace模式：输出请求详情（IP在白名单，允许打印trace）
-		s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 		// 继续后续处理（hook模式、forward等）
 	} else {
 		// 2. IP黑名单和国家封锁检查：如果被封锁，直接阻断
 		if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
 			reason := "IP被阻断或国家不合法，阻止转发"
-			// log-options press: 当press启用时，抑制被阻断请求的所有trace日志（只关注被forward的结果）
-			if s.hasDevMode("trace") && !s.hasLogOption("press") {
-				isBlocked := blocker.isIPBlocked(clientIP)
-				countryAllowed := blocker.isCountryAllowed(clientCountry)
-				s.Logger.Info(reason,
-					zap.String("clientIP", clientIP.String()),
-					zap.Bool("isIPBlocked", isBlocked),
-					zap.Bool("isCountryAllowed", countryAllowed),
-					zap.String("country", clientCountry),
-					zap.String("qname", qname))
-			}
 			return sendBlockResponse(reason)
 		}
 
 		// 3. 域名检查：解析qname，判断白名单/黑名单
 		if blocker.isWhiteDomain(qname) {
 			// 域名在白名单，放行
-			if s.hasDevMode("trace") {
-				s.Logger.Info("域名在白名单中，允许转发",
-					zap.String("clientIP", clientIP.String()),
-					zap.String("qname", qname),
-					zap.String("country", clientCountry))
-			}
-			// trace模式：输出请求详情（域名在白名单，允许打印trace）
-			s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 			// 继续后续处理
 		} else if blocker.isBlockedDomain(qname) {
 			// 域名在黑名单，阻断
-			// log-options press: 当press启用时，抑制被阻断请求的所有trace日志（只关注被forward的结果）
-			if s.hasDevMode("trace") && !s.hasLogOption("press") {
-				s.Logger.Info("域名被阻断，阻止转发",
-					zap.String("clientIP", clientIP.String()),
-					zap.String("qname", qname))
-			}
-			// 域名被阻断，不打印trace
 			return sendBlockResponse("域名被阻断，阻止转发")
 		} else {
 			// 普通IP且域名未被阻断，允许转发
-			if s.hasDevMode("trace") {
-				s.Logger.Info("普通IP且域名未被阻断，允许转发",
-					zap.String("clientIP", clientIP.String()),
-					zap.String("qname", qname),
-					zap.String("country", clientCountry))
-			}
-			// trace模式：输出请求详情（域名未被阻断，允许打印trace）
-			s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
 			// 继续后续处理
 		}
-	}
-
-	// hook模式：在forward时返回127.127.127.127（仅在shouldForward为true时执行）
-	if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, packet, clientIP, traceId, qname, qtype); handled {
-		return err
 	}
 
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
@@ -391,19 +338,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil
 	}
 
-	// 解析响应头用于trace模式
-	var respHeader dnsmessage.Header
-	if s.hasDevMode("trace") {
-		var respParser dnsmessage.Parser
-		h, err := respParser.Start(resp)
-		if err == nil {
-			respHeader = h
-		}
-	}
-
-	// trace模式：输出响应详情
-	s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
-
 	// 业务事件：成功响应，记录为 Debug（避免日志过多，只记录关键信息）
 	s.Logger.Debug("DNS请求成功响应",
 		zap.String("clientIP", clientIP.String()),
@@ -413,13 +347,8 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		zap.Int("traceId", traceId),
 		zap.Int("responseSize", len(resp)))
 
-	// trace模式：输出准备发送详情
-	s.traceDNSSend(resp, clientAddr, traceId)
-
 	// 发送DNS响应
 	if err := s.writePacket(packet, clientAddr, resp); err != nil {
-		// trace模式：输出发送失败详情
-		s.traceDNSSendResult(resp, clientAddr, traceId, err)
 		s.Logger.Error("发送DNS响应到客户端失败",
 			zap.Error(err),
 			zap.String("clientIP", clientIP.String()),
@@ -429,8 +358,6 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return err
 	}
-	// trace模式：输出发送成功详情
-	s.traceDNSSendResult(resp, clientAddr, traceId, nil)
 	s.Logger.Debug("DNS响应已成功发送到客户端",
 		zap.String("clientIP", clientIP.String()),
 		zap.String("qname", qname),
