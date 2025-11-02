@@ -175,7 +175,11 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 	if udpConn, ok := packet.(*net.UDPConn); ok {
 		clientUDPAddr, ok := clientAddr.(*net.UDPAddr)
 		if !ok {
-			s.Logger.Debug("客户端地址类型异常", zap.Any("clientAddr", clientAddr))
+			// log-options press: 抑制未forward请求的控制台输出
+			// 地址类型异常意味着请求不会被处理，所以应该被抑制
+			if !s.hasLogOption("press") {
+				s.Logger.Debug("客户端地址类型异常", zap.Any("clientAddr", clientAddr))
+			}
 			return nil
 		}
 		return s.processUDPRequestWithConn(ctx, clientUDPAddr, reqBytes, udpConn)
@@ -395,24 +399,54 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 		return nil
 	}
 
-	// 解析响应头用于trace模式
+	// 解析响应头用于trace模式和记录上游DNS状态
 	var respHeader dnsmessage.Header
-	if s.hasDevMode("trace") {
+	var upstreamRCode dnsmessage.RCode = dnsmessage.RCodeSuccess // 默认值
+	if len(resp) >= 12 {
+		// 解析响应头获取RCode
 		var respParser dnsmessage.Parser
 		h, err := respParser.Start(resp)
 		if err == nil {
 			respHeader = h
+			upstreamRCode = h.RCode
+			// 记录上游DNS返回的RCode状态
+			s.Logger.Debug("上游DNS应答状态",
+				zap.String("rcode", DnsRCodeToString(upstreamRCode)),
+				zap.Uint8("rcodeValue", uint8(upstreamRCode)),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("qtype", qtype),
+				zap.Int("traceId", traceId))
+		} else {
+			// 如果解析失败，尝试从原始字节读取RCode（DNS头部第3个字节的低4位）
+			upstreamRCode = dnsmessage.RCode(resp[3] & 0x0F)
+			s.Logger.Debug("上游DNS应答状态（从原始字节解析）",
+				zap.String("rcode", DnsRCodeToString(upstreamRCode)),
+				zap.Uint8("rcodeValue", uint8(upstreamRCode)),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Error(err),
+				zap.Int("traceId", traceId))
 		}
+	} else {
+		// 响应数据过短，无法解析RCode
+		s.Logger.Debug("上游DNS响应数据过短，无法解析RCode",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("responseSize", len(resp)))
 	}
 
 	// trace模式：输出响应详情
-	s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+	if s.hasDevMode("trace") {
+		s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+	}
 
 	s.Logger.Debug("DNS请求成功响应",
 		zap.String("clientIP", clientIP.String()),
 		zap.String("qname", qname),
 		zap.String("qtype", qtype),
 		zap.String("rtt", dnslog.RTT),
+		zap.String("upstreamRCode", DnsRCodeToString(upstreamRCode)),
 		zap.Int("traceId", traceId),
 		zap.Int("responseSize", len(resp)))
 
@@ -705,18 +739,47 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 		return nil
 	}
 
-	// 解析响应头用于trace模式
+	// 解析响应头用于trace模式和记录上游DNS状态
 	var respHeader dnsmessage.Header
-	if s.hasDevMode("trace") {
+	var upstreamRCode dnsmessage.RCode = dnsmessage.RCodeSuccess // 默认值
+	if len(resp) >= 12 {
+		// 解析响应头获取RCode
 		var respParser dnsmessage.Parser
 		h, err := respParser.Start(resp)
 		if err == nil {
 			respHeader = h
+			upstreamRCode = h.RCode
+			// 记录上游DNS返回的RCode状态
+			s.Logger.Debug("上游DNS应答状态",
+				zap.String("rcode", DnsRCodeToString(upstreamRCode)),
+				zap.Uint8("rcodeValue", uint8(upstreamRCode)),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("qtype", qtype),
+				zap.Int("traceId", traceId))
+		} else {
+			// 如果解析失败，尝试从原始字节读取RCode（DNS头部第3个字节的低4位）
+			upstreamRCode = dnsmessage.RCode(resp[3] & 0x0F)
+			s.Logger.Debug("上游DNS应答状态（从原始字节解析）",
+				zap.String("rcode", DnsRCodeToString(upstreamRCode)),
+				zap.Uint8("rcodeValue", uint8(upstreamRCode)),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Error(err),
+				zap.Int("traceId", traceId))
 		}
+	} else {
+		// 响应数据过短，无法解析RCode
+		s.Logger.Debug("上游DNS响应数据过短，无法解析RCode",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("responseSize", len(resp)))
 	}
 
 	// trace模式：输出响应详情
-	s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+	if s.hasDevMode("trace") {
+		s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+	}
 
 	// 业务事件：成功响应，记录为 Debug（避免日志过多，只记录关键信息）
 	s.Logger.Debug("DNS请求成功响应",
@@ -724,6 +787,7 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 		zap.String("qname", qname),
 		zap.String("qtype", qtype),
 		zap.String("rtt", dnslog.RTT),
+		zap.String("upstreamRCode", DnsRCodeToString(upstreamRCode)),
 		zap.Int("traceId", traceId),
 		zap.Int("responseSize", len(resp)))
 
