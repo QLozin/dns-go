@@ -60,6 +60,15 @@ func (d *DB) Open() error {
 		}
 		return fmt.Errorf("设置 WAL 模式失败: %w", err)
 	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		db.Close()
+		if d.Logger != nil {
+			d.Logger.Error("设置数据库忙等待时间失败",
+				zap.String("sqlitePath", sqlitePath),
+				zap.Error(err))
+		}
+		return fmt.Errorf("设置数据库忙等待时间失败: %w", err)
+	}
 	d.db = db
 	if err := d.migrate(); err != nil {
 		db.Close()
@@ -120,6 +129,21 @@ CREATE INDEX IF NOT EXISTS idx_query_logs_qname ON query_logs(qname);
 }
 
 func (d *DB) InsertDnsLog(log DnsLog) error {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				d.Logger.Error("插入DNS日志失败", zap.Any("dnslog", log), zap.Error(fmt.Errorf("panic: %v", r)))
+			}
+		}()
+		if err := d.insertDnsLog(log); err != nil {
+			d.Logger.Error("插入DNS日志失败", zap.Any("dnslog", log), zap.Error(err))
+		}
+	}()
+	return nil
+
+}
+
+func (d *DB) insertDnsLog(log DnsLog) error {
 	db := d.db
 	if db == nil {
 		return fmt.Errorf("数据库连接未初始化")
