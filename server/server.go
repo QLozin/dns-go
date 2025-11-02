@@ -419,26 +419,41 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 	// trace模式：输出准备发送详情
 	s.traceDNSSend(resp, clientAddr, traceId)
 
-	// ⭐ 确保响应中的Transaction ID与请求中的ID匹配
-	// 这是关键的修复：客户端会验证Transaction ID，如果不匹配会丢弃响应
+	// ⭐ 验证并修正响应消息，确保客户端能正确接收
+	// 关键修复：客户端会严格验证Transaction ID和响应格式
 	if len(resp) >= 12 {
 		// DNS头部的前2个字节是Transaction ID
 		respID := uint16(resp[0])<<8 | uint16(resp[1])
 		if respID != header.ID {
-			s.Logger.Debug("修正响应中的Transaction ID",
+			s.Logger.Info("修正响应中的Transaction ID（上游DNS返回的ID与请求不匹配）",
 				zap.Uint16("originalID", respID),
 				zap.Uint16("expectedID", header.ID),
-				zap.String("clientIP", clientIP.String()))
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
 			// 修正Transaction ID（前2个字节）
-			resp[0] = byte(header.ID >> 8)
-			resp[1] = byte(header.ID & 0xFF)
+			// 创建新的slice避免修改原始数据
+			fixedResp := make([]byte, len(resp))
+			copy(fixedResp, resp)
+			fixedResp[0] = byte(header.ID >> 8)
+			fixedResp[1] = byte(header.ID & 0xFF)
+			resp = fixedResp
+		}
+
+		// 验证响应是一个有效的DNS响应（QR标志位应该是1）
+		if (resp[2] & 0x80) == 0 {
+			s.Logger.Warn("上游DNS响应格式异常（QR标志位为0，不是响应消息）",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
 		}
 	}
 
 	// 使用 WriteToUDP 发送响应，确保从正确的源IP和端口发送
 	deadline := time.Now().Add(5 * time.Second)
 	conn.SetWriteDeadline(deadline)
-	_, err = conn.WriteToUDP(resp, clientAddr)
+	written, err := conn.WriteToUDP(resp, clientAddr)
+	if err == nil && written != len(resp) {
+		err = fmt.Errorf("部分写入：期望%d字节，实际写入%d字节", len(resp), written)
+	}
 	if err != nil {
 		s.traceDNSSendResult(resp, clientAddr, traceId, err)
 		s.Logger.Error("发送DNS响应到客户端失败",
@@ -715,19 +730,31 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 	// trace模式：输出准备发送详情
 	s.traceDNSSend(resp, clientAddr, traceId)
 
-	// ⭐ 确保响应中的Transaction ID与请求中的ID匹配
-	// 这是关键的修复：客户端会验证Transaction ID，如果不匹配会丢弃响应
+	// ⭐ 验证并修正响应消息，确保客户端能正确接收
+	// 关键修复：客户端会严格验证Transaction ID和响应格式
 	if len(resp) >= 12 {
 		// DNS头部的前2个字节是Transaction ID
 		respID := uint16(resp[0])<<8 | uint16(resp[1])
 		if respID != header.ID {
-			s.Logger.Debug("修正响应中的Transaction ID",
+			s.Logger.Info("修正响应中的Transaction ID（上游DNS返回的ID与请求不匹配）",
 				zap.Uint16("originalID", respID),
 				zap.Uint16("expectedID", header.ID),
-				zap.String("clientIP", clientIP.String()))
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
 			// 修正Transaction ID（前2个字节）
-			resp[0] = byte(header.ID >> 8)
-			resp[1] = byte(header.ID & 0xFF)
+			// 创建新的slice避免修改原始数据
+			fixedResp := make([]byte, len(resp))
+			copy(fixedResp, resp)
+			fixedResp[0] = byte(header.ID >> 8)
+			fixedResp[1] = byte(header.ID & 0xFF)
+			resp = fixedResp
+		}
+
+		// 验证响应是一个有效的DNS响应（QR标志位应该是1）
+		if (resp[2] & 0x80) == 0 {
+			s.Logger.Warn("上游DNS响应格式异常（QR标志位为0，不是响应消息）",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
 		}
 	}
 
