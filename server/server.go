@@ -33,7 +33,6 @@ func (s *Server) Stop() {
 }
 
 func (s *Server) Start() error {
-	// 边界层：必须记录所有启动失败的错误
 	if err := s.waitBlockerStart(); err != nil {
 		s.Logger.Error("等待Blocker启动失败", zap.Error(err))
 		s.Stop()
@@ -176,17 +175,124 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 			zap.Int("traceId", traceId))
 		return nil
 	}
+
+	sendBlockResponseWithoutQname := func(reason string) error {
+		var questionParser dnsmessage.Parser
+		_, qerr := questionParser.Start(reqBytes)
+		var nxdomain []byte
+		var qname, qtype string
+
+		if qerr == nil {
+			ques, qerr := questionParser.Question()
+			if qerr == nil {
+				qtype = DnsReqTypeToString(ques.Type)
+				qname = ques.Name.String()
+				qname = strings.ToLower(qname)
+				qname = strings.TrimSuffix(qname, ".")
+
+				msg := dnsmessage.Message{
+					Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
+					Questions: []dnsmessage.Question{ques},
+				}
+				var packErr error
+				nxdomain, packErr = msg.Pack()
+				if packErr != nil {
+					s.Logger.Error("打包NXDOMAIN消息失败",
+						zap.Error(packErr),
+						zap.String("clientIP", clientIP.String()),
+						zap.Int("traceId", traceId))
+					return nil
+				}
+			}
+		}
+
+		if qname == "" {
+			qtype = ""
+			msg := dnsmessage.Message{
+				Header: dnsmessage.Header{
+					ID:                 header.ID,
+					Response:           true,
+					Authoritative:      false,
+					RCode:              dnsmessage.RCodeFormatError,
+					RecursionDesired:   header.RecursionDesired,
+					RecursionAvailable: true,
+				},
+				Questions: []dnsmessage.Question{},
+			}
+			var packErr error
+			nxdomain, packErr = msg.Pack()
+			if packErr != nil {
+				s.Logger.Error("打包FORMERR消息失败",
+					zap.Error(packErr),
+					zap.String("clientIP", clientIP.String()),
+					zap.Int("traceId", traceId))
+				return nil
+			}
+		}
+
+		var dnslog DnsLog
+		if qname != "" {
+			dnslog = s.buildNXDomainDNSLog(traceId, qname, qtype)
+		} else {
+			dnslog = DnsLog{
+				Time:     TimeNow(),
+				Protocol: "udp",
+				RCode:    "FORMERR",
+				Blocked:  true,
+				RTT:      "0.00ms",
+				QName:    "",
+				QType:    "",
+				MsgId:    traceId,
+			}
+		}
+		dnslog.ClientIP = clientIP.String()
+		dnslog.GeoCountry = clientCountryName
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+
+		logFields := []zap.Field{
+			zap.String("clientIP", clientIP.String()),
+			zap.String("clientCountry", clientCountryName),
+			zap.String("reason", reason),
+			zap.Int("traceId", traceId),
+		}
+		if qname != "" {
+			logFields = append(logFields, zap.String("qname", qname))
+		}
+
+		s.Logger.Debug("DNS请求被阻止（返回阻断响应）", logFields...)
+		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+			s.Logger.Error("发送阻断响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.Int("traceId", traceId))
+			return err
+		}
+		return nil
+	}
+
+	if blocker.isIPAllowed(clientIP) {
+	} else {
+		if blocker.isIPBlocked(clientIP) {
+			return sendBlockResponseWithoutQname("IP被阻断，阻止转发")
+		}
+
+		if !blocker.isCountryAllowed(clientCountry) {
+			return sendBlockResponseWithoutQname("国家/城市被阻断，阻止转发")
+		}
+	}
+
 	ques, err := parser.Question()
 	if err != nil {
 		s.logQuestionParseError(err, clientIP, traceId, header, reqBytes)
-		return nil
+		return sendBlockResponseWithoutQname("请求格式错误")
 	}
+
 	qtype := DnsReqTypeToString(ques.Type)
 	qname := ques.Name.String()
 	qname = strings.ToLower(qname)
 	qname = strings.TrimSuffix(qname, ".")
 
-	// 准备NXDOMAIN响应（用于阻断时返回）
 	msg := dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: header.ID, Response: true, Authoritative: false, RCode: dnsmessage.RCodeNameError},
 		Questions: []dnsmessage.Question{ques},
@@ -200,8 +306,7 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil
 	}
 
-	// 辅助函数：发送阻断响应并返回
-	sendBlockResponse := func(reason string) error {
+	sendDomainBlockResponse := func(reason string) error {
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
 		dnslog.ClientIP = clientIP.String()
 		dnslog.GeoCountry = clientCountryName
@@ -224,113 +329,17 @@ func (s *Server) processUDPRequest(ctx context.Context, clientAddr net.Addr, req
 		return nil
 	}
 
-	// 1. IP白名单检查：如果在白名单，直接允许，跳过后续检查
-	if blocker.isIPAllowed(clientIP) {
-		// 继续后续处理（hook模式、forward等）
-	} else {
-		// 2. IP黑名单和国家封锁检查：如果被封锁，直接阻断
-		if blocker.isIPBlocked(clientIP) || !blocker.isCountryAllowed(clientCountry) {
-			reason := "IP被阻断或国家不合法，阻止转发"
-			return sendBlockResponse(reason)
-		}
-
-		// 3. 域名检查：解析qname，判断白名单/黑名单
-		if blocker.isWhiteDomain(qname) {
-			// 域名在白名单，放行
-			// 继续后续处理
-		} else if blocker.isBlockedDomain(qname) {
-			// 域名在黑名单，阻断
-			return sendBlockResponse("域名被阻断，阻止转发")
-		} else {
-			// 普通IP且域名未被阻断，允许转发
-			// 继续后续处理
-		}
+	if blocker.isWhiteDomain(qname) {
+	} else if blocker.isBlockedDomain(qname) {
+		return sendDomainBlockResponse("域名被阻断，阻止转发")
 	}
 
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
 	if err != nil || len(resp) == 0 {
-		errorMsg := ""
-		if err != nil {
-			errorMsg = err.Error()
-		} else {
-			errorMsg = "响应为空"
-		}
-		dnslog := DnsLog{
-			Time:        TimeNow(),
-			Protocol:    "udp",
-			RCode:       "SERVFAIL",
-			Blocked:     false,
-			RTT:         "0.00ms",
-			QName:       qname,
-			QType:       qtype,
-			MsgId:       traceId,
-			ClientIP:    clientIP.String(),
-			GeoCountry:  clientCountryName,
-			UpstreamDNS: s.upstreamDNS[0].String(),
-			Error:       errorMsg,
-		}
-		_ = s.DB.InsertDnsLog(dnslog)
-		s.Logger.Warn("DNS转发失败",
-			zap.String("clientIP", clientIP.String()),
-			zap.String("qname", qname),
-			zap.String("upstreamDNS", s.upstreamDNS[0].String()),
-			zap.Error(err),
-			zap.Int("traceId", traceId))
-		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
-			s.Logger.Error("发送SERVFAIL响应到客户端失败",
-				zap.Error(err),
-				zap.String("clientIP", clientIP.String()),
-				zap.String("qname", qname),
-				zap.Int("traceId", traceId))
-			return err
-		}
-		return nil
-	}
-	dnslog := DnsLog{
-		Time:        TimeNow(),
-		Protocol:    "udp",
-		RCode:       "NOERROR",
-		Blocked:     false,
-		RTT:         fmt.Sprintf("%.2fms", rtt),
-		QName:       qname,
-		QType:       qtype,
-		MsgId:       traceId,
-		ClientIP:    clientIP.String(),
-		GeoCountry:  clientCountryName,
-		UpstreamDNS: s.upstreamDNS[0].String(),
-	}
-	_ = s.DB.InsertDnsLog(dnslog)
-	// 验证响应数据的有效性（至少包含DNS头部）
-	if len(resp) < 12 {
-		s.Logger.Error("上游DNS响应数据过短，无法解析",
-			zap.String("clientIP", clientIP.String()),
-			zap.String("qname", qname),
-			zap.Int("responseSize", len(resp)),
-			zap.Int("traceId", traceId))
-		// 返回SERVFAIL响应
-		if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
-			s.Logger.Error("发送SERVFAIL响应失败", zap.Error(err))
-		}
-		return nil
+		return s.handleForwardError(err, qname, qtype, clientIP, clientCountryName, traceId, packet, clientAddr, nxdomain)
 	}
 
-	s.Logger.Debug("DNS请求成功响应",
-		zap.String("clientIP", clientIP.String()),
-		zap.String("qname", qname),
-		zap.String("qtype", qtype),
-		zap.String("rtt", dnslog.RTT),
-		zap.Int("traceId", traceId),
-		zap.Int("responseSize", len(resp)))
-
-	// 发送DNS响应
-	if err := s.writePacket(packet, clientAddr, resp); err != nil {
-		s.Logger.Error("发送DNS响应到客户端失败",
-			zap.Error(err),
-			zap.String("clientIP", clientIP.String()),
-			zap.String("qname", qname),
-			zap.String("qtype", qtype),
-			zap.Int("responseSize", len(resp)),
-			zap.Int("traceId", traceId))
+	if err := s.handleForwardSuccess(resp, rtt, qname, qtype, clientIP, clientCountryName, traceId, packet, clientAddr); err != nil {
 		return err
 	}
 	return nil
@@ -369,6 +378,92 @@ func (s *Server) forwardUDP(ctx context.Context, reqBytes []byte) ([]byte, float
 	return resp, rtt, nil
 }
 
+func (s *Server) handleForwardError(err error, qname, qtype string, clientIP net.IP, clientCountryName string, traceId int, packet net.PacketConn, clientAddr net.Addr, nxdomain []byte) error {
+	errorMsg := "响应为空"
+	if err != nil {
+		errorMsg = err.Error()
+	}
+
+	dnslog := DnsLog{
+		Time:        TimeNow(),
+		Protocol:    "udp",
+		RCode:       "SERVFAIL",
+		Blocked:     false,
+		RTT:         "0.00ms",
+		QName:       qname,
+		QType:       qtype,
+		MsgId:       traceId,
+		ClientIP:    clientIP.String(),
+		GeoCountry:  clientCountryName,
+		UpstreamDNS: s.upstreamDNS[0].String(),
+		Error:       errorMsg,
+	}
+	_ = s.DB.InsertDnsLog(dnslog)
+
+	s.Logger.Warn("DNS转发失败",
+		zap.String("clientIP", clientIP.String()),
+		zap.String("qname", qname),
+		zap.String("upstreamDNS", s.upstreamDNS[0].String()),
+		zap.Error(err),
+		zap.Int("traceId", traceId))
+
+	if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+		s.Logger.Error("发送SERVFAIL响应到客户端失败",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("traceId", traceId))
+		return err
+	}
+	return nil
+}
+
+func (s *Server) handleForwardSuccess(resp []byte, rtt float64, qname, qtype string, clientIP net.IP, clientCountryName string, traceId int, packet net.PacketConn, clientAddr net.Addr) error {
+	if len(resp) < 12 {
+		s.Logger.Error("上游DNS响应数据过短，无法解析",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		return nil
+	}
+
+	dnslog := DnsLog{
+		Time:        TimeNow(),
+		Protocol:    "udp",
+		RCode:       "NOERROR",
+		Blocked:     false,
+		RTT:         fmt.Sprintf("%.2fms", rtt),
+		QName:       qname,
+		QType:       qtype,
+		MsgId:       traceId,
+		ClientIP:    clientIP.String(),
+		GeoCountry:  clientCountryName,
+		UpstreamDNS: s.upstreamDNS[0].String(),
+	}
+	_ = s.DB.InsertDnsLog(dnslog)
+
+	s.Logger.Debug("DNS请求成功响应",
+		zap.String("clientIP", clientIP.String()),
+		zap.String("qname", qname),
+		zap.String("qtype", qtype),
+		zap.String("rtt", dnslog.RTT),
+		zap.Int("traceId", traceId),
+		zap.Int("responseSize", len(resp)))
+
+	if err := s.writePacket(packet, clientAddr, resp); err != nil {
+		s.Logger.Error("发送DNS响应到客户端失败",
+			zap.Error(err),
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.String("qtype", qtype),
+			zap.Int("responseSize", len(resp)),
+			zap.Int("traceId", traceId))
+		return err
+	}
+	return nil
+}
+
 func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, header dnsmessage.Header, reqBytes []byte) {
 	headerInfo := map[string]interface{}{
 		"id":     header.ID,
@@ -378,9 +473,9 @@ func (s *Server) logQuestionParseError(err error, clientIP net.IP, traceId int, 
 
 	var msg string
 	if err == dnsmessage.ErrSectionDone {
-		msg = "客户端请求格式错误（请求缺少Question部分）"
+		msg = "客户端请求格式错误（DNS请求缺少Question部分失败）"
 	} else {
-		msg = "客户端请求格式错误（解析请求问题失败）"
+		msg = "客户端请求格式错误（DNS请求解析失败）"
 	}
 
 	fields := []zap.Field{
