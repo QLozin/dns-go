@@ -419,6 +419,22 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 	// trace模式：输出准备发送详情
 	s.traceDNSSend(resp, clientAddr, traceId)
 
+	// ⭐ 确保响应中的Transaction ID与请求中的ID匹配
+	// 这是关键的修复：客户端会验证Transaction ID，如果不匹配会丢弃响应
+	if len(resp) >= 12 {
+		// DNS头部的前2个字节是Transaction ID
+		respID := uint16(resp[0])<<8 | uint16(resp[1])
+		if respID != header.ID {
+			s.Logger.Debug("修正响应中的Transaction ID",
+				zap.Uint16("originalID", respID),
+				zap.Uint16("expectedID", header.ID),
+				zap.String("clientIP", clientIP.String()))
+			// 修正Transaction ID（前2个字节）
+			resp[0] = byte(header.ID >> 8)
+			resp[1] = byte(header.ID & 0xFF)
+		}
+	}
+
 	// 使用 WriteToUDP 发送响应，确保从正确的源IP和端口发送
 	deadline := time.Now().Add(5 * time.Second)
 	conn.SetWriteDeadline(deadline)
@@ -698,6 +714,22 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 
 	// trace模式：输出准备发送详情
 	s.traceDNSSend(resp, clientAddr, traceId)
+
+	// ⭐ 确保响应中的Transaction ID与请求中的ID匹配
+	// 这是关键的修复：客户端会验证Transaction ID，如果不匹配会丢弃响应
+	if len(resp) >= 12 {
+		// DNS头部的前2个字节是Transaction ID
+		respID := uint16(resp[0])<<8 | uint16(resp[1])
+		if respID != header.ID {
+			s.Logger.Debug("修正响应中的Transaction ID",
+				zap.Uint16("originalID", respID),
+				zap.Uint16("expectedID", header.ID),
+				zap.String("clientIP", clientIP.String()))
+			// 修正Transaction ID（前2个字节）
+			resp[0] = byte(header.ID >> 8)
+			resp[1] = byte(header.ID & 0xFF)
+		}
+	}
 
 	// 发送DNS响应
 	if err := s.writePacket(packet, clientAddr, resp); err != nil {
