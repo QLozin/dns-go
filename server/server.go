@@ -231,6 +231,23 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 		return nil
 	}
 
+	// hook模式：在hook模式下跳过所有阻拦检查（临时全部加白）
+	hookModeEnabled := s.hasDevMode("hook")
+	if hookModeEnabled {
+		if s.hasDevMode("trace") {
+			s.Logger.Info("hook模式：跳过所有阻拦检查，允许转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
+		}
+		// trace模式：输出请求详情
+		s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
+		// hook模式处理
+		if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, conn, clientIP, traceId, qname, qtype); handled {
+			return err
+		}
+		// hook处理失败，继续后续转发（但跳过所有阻拦检查）
+	}
+
 	// 辅助函数：发送阻断响应
 	sendBlockResponse := func(reason string) error {
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
@@ -264,6 +281,114 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 				zap.Int("traceId", traceId))
 			return err
 		}
+		return nil
+	}
+
+	// hook模式：如果hook模式启用，跳过所有阻拦检查，直接进入转发逻辑
+	if hookModeEnabled {
+		// hook模式已处理或处理失败，跳过所有阻拦检查，直接转发
+		// hook模式已在前面处理，这里不再重复处理
+		// 转发请求
+		resp, rtt, err := s.forwardUDP(ctx, reqBytes)
+		if err != nil || len(resp) == 0 {
+			errorMsg := ""
+			if err != nil {
+				errorMsg = err.Error()
+			} else {
+				errorMsg = "响应为空"
+			}
+			dnslog := DnsLog{
+				Time:        TimeNow(),
+				Protocol:    "udp",
+				RCode:       "SERVFAIL",
+				Blocked:     false,
+				RTT:         "0.00ms",
+				QName:       qname,
+				QType:       qtype,
+				MsgId:       traceId,
+				ClientIP:    clientIP.String(),
+				GeoCountry:  clientCountryName,
+				UpstreamDNS: s.upstreamDNS[0].String(),
+				Error:       errorMsg,
+			}
+			if err := s.DB.InsertDnsLog(dnslog); err != nil {
+			}
+			s.Logger.Warn("DNS转发失败",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("upstreamDNS", s.upstreamDNS[0].String()),
+				zap.Error(err),
+				zap.Int("traceId", traceId))
+			deadline := time.Now().Add(5 * time.Second)
+			conn.SetWriteDeadline(deadline)
+			_, err := conn.WriteToUDP(nxdomain, clientAddr)
+			if err != nil {
+				s.Logger.Error("发送SERVFAIL响应到客户端失败",
+					zap.Error(err),
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname),
+					zap.Int("traceId", traceId))
+				return err
+			}
+			return nil
+		}
+
+		// 转发成功，记录日志
+		dnslog := DnsLog{
+			Time:        TimeNow(),
+			Protocol:    "udp",
+			RCode:       "NOERROR",
+			Blocked:     false,
+			RTT:         fmt.Sprintf("%.2fms", rtt),
+			QName:       qname,
+			QType:       qtype,
+			MsgId:       traceId,
+			ClientIP:    clientIP.String(),
+			GeoCountry:  clientCountryName,
+			UpstreamDNS: s.upstreamDNS[0].String(),
+		}
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+
+		// trace模式：输出响应详情
+		var respHeader dnsmessage.Header
+		var respParser dnsmessage.Parser
+		if _, err := respParser.Start(resp); err == nil {
+			respHeader, _ = respParser.Start(resp)
+			s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+		}
+
+		// 发送响应
+		s.traceDNSSend(resp, clientAddr, traceId)
+		deadline := time.Now().Add(5 * time.Second)
+		conn.SetWriteDeadline(deadline)
+		written, err := conn.WriteToUDP(resp, clientAddr)
+		if written != len(resp) {
+			s.Logger.Warn("DNS响应未完全发送",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.Int("expected", len(resp)),
+				zap.Int("written", written),
+				zap.Int("traceId", traceId))
+		}
+		if err != nil {
+			s.traceDNSSendResult(resp, clientAddr, traceId, err)
+			s.Logger.Error("发送DNS响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("qtype", qtype),
+				zap.Int("responseSize", len(resp)),
+				zap.Int("traceId", traceId))
+			return err
+		}
+
+		// trace模式：输出发送成功详情
+		s.traceDNSSendResult(resp, clientAddr, traceId, nil)
+		s.Logger.Debug("DNS响应已成功发送到客户端",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("traceId", traceId))
 		return nil
 	}
 
@@ -319,10 +444,7 @@ func (s *Server) processUDPRequestWithConn(ctx context.Context, clientAddr *net.
 		}
 	}
 
-	// hook模式
-	if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, conn, clientIP, traceId, qname, qtype); handled {
-		return err
-	}
+	// hook模式已在前面处理，这里不再重复处理
 
 	// 转发请求
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
@@ -564,6 +686,23 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 		return nil
 	}
 
+	// hook模式：在hook模式下跳过所有阻拦检查（临时全部加白）
+	hookModeEnabled := s.hasDevMode("hook")
+	if hookModeEnabled {
+		if s.hasDevMode("trace") {
+			s.Logger.Info("hook模式：跳过所有阻拦检查，允许转发",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname))
+		}
+		// trace模式：输出请求详情
+		s.traceDNSRequest(reqBytes, header, ques, clientIP, traceId)
+		// hook模式处理
+		if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, packet, clientIP, traceId, qname, qtype); handled {
+			return err
+		}
+		// hook处理失败，继续后续转发（但跳过所有阻拦检查）
+	}
+
 	// 辅助函数：发送阻断响应并返回
 	sendBlockResponse := func(reason string) error {
 		dnslog := s.buildNXDomainDNSLog(traceId, qname, qtype)
@@ -595,6 +734,99 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 				zap.Int("traceId", traceId))
 			return err
 		}
+		return nil
+	}
+
+	// hook模式：如果hook模式启用，跳过所有阻拦检查，直接进入转发逻辑
+	if hookModeEnabled {
+		// hook模式已处理或处理失败，跳过所有阻拦检查，直接转发
+		// hook模式已在前面处理，这里不再重复处理
+		resp, rtt, err := s.forwardUDP(ctx, reqBytes)
+		if err != nil || len(resp) == 0 {
+			errorMsg := ""
+			if err != nil {
+				errorMsg = err.Error()
+			} else {
+				errorMsg = "响应为空"
+			}
+			dnslog := DnsLog{
+				Time:        TimeNow(),
+				Protocol:    "udp",
+				RCode:       "SERVFAIL",
+				Blocked:     false,
+				RTT:         "0.00ms",
+				QName:       qname,
+				QType:       qtype,
+				MsgId:       traceId,
+				ClientIP:    clientIP.String(),
+				GeoCountry:  clientCountryName,
+				UpstreamDNS: s.upstreamDNS[0].String(),
+				Error:       errorMsg,
+			}
+			if err := s.DB.InsertDnsLog(dnslog); err != nil {
+			}
+			s.Logger.Warn("DNS转发失败",
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("upstreamDNS", s.upstreamDNS[0].String()),
+				zap.Error(err),
+				zap.Int("traceId", traceId))
+			if err := s.writePacket(packet, clientAddr, nxdomain); err != nil {
+				s.Logger.Error("发送SERVFAIL响应到客户端失败",
+					zap.Error(err),
+					zap.String("clientIP", clientIP.String()),
+					zap.String("qname", qname),
+					zap.Int("traceId", traceId))
+				return err
+			}
+			return nil
+		}
+
+		// 转发成功，记录日志
+		dnslog := DnsLog{
+			Time:        TimeNow(),
+			Protocol:    "udp",
+			RCode:       "NOERROR",
+			Blocked:     false,
+			RTT:         fmt.Sprintf("%.2fms", rtt),
+			QName:       qname,
+			QType:       qtype,
+			MsgId:       traceId,
+			ClientIP:    clientIP.String(),
+			GeoCountry:  clientCountryName,
+			UpstreamDNS: s.upstreamDNS[0].String(),
+		}
+		if err := s.DB.InsertDnsLog(dnslog); err != nil {
+		}
+
+		// trace模式：输出响应详情
+		var respHeader dnsmessage.Header
+		var respParser dnsmessage.Parser
+		if _, err := respParser.Start(resp); err == nil {
+			respHeader, _ = respParser.Start(resp)
+			s.traceDNSResponse(resp, respHeader, clientIP, traceId, rtt)
+		}
+
+		// 发送响应
+		s.traceDNSSend(resp, clientAddr, traceId)
+		if err := s.writePacket(packet, clientAddr, resp); err != nil {
+			s.traceDNSSendResult(resp, clientAddr, traceId, err)
+			s.Logger.Error("发送DNS响应到客户端失败",
+				zap.Error(err),
+				zap.String("clientIP", clientIP.String()),
+				zap.String("qname", qname),
+				zap.String("qtype", qtype),
+				zap.Int("responseSize", len(resp)),
+				zap.Int("traceId", traceId))
+			return err
+		}
+
+		// trace模式：输出发送成功详情
+		s.traceDNSSendResult(resp, clientAddr, traceId, nil)
+		s.Logger.Debug("DNS响应已成功发送到客户端",
+			zap.String("clientIP", clientIP.String()),
+			zap.String("qname", qname),
+			zap.Int("traceId", traceId))
 		return nil
 	}
 
@@ -662,10 +894,7 @@ func (s *Server) processUDPRequestOriginal(ctx context.Context, clientAddr net.A
 		}
 	}
 
-	// hook模式：在forward时返回127.127.127.127（仅在shouldForward为true时执行）
-	if handled, err := s.handleDevModeHook(header.ID, ques, clientAddr, packet, clientIP, traceId, qname, qtype); handled {
-		return err
-	}
+	// hook模式已在前面处理，这里不再重复处理
 
 	resp, rtt, err := s.forwardUDP(ctx, reqBytes)
 	if err != nil || len(resp) == 0 {
